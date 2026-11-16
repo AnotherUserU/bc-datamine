@@ -60,6 +60,30 @@ for _, f in ipairs(RS:GetChildren()) do
 end
 lines[#lines + 1] = "-- mendengar: " .. table.concat(found, ", ")
 
+-- v2: atribut status air defense (amunisi, magazine, ReadyAt = reload pasti dari server)
+local WATCH = { "PatriotAmmo", "PatriotMagazine", "PatriotReadyAt", "PatriotResupplying", "PatriotEnabled", "Operational" }
+local watched = 0
+local function watchBuilding(m)
+  if not m:IsA("Model") or m:GetAttribute("PatriotMagazine") == nil then return end
+  watched = watched + 1
+  local p = m:GetPivot().Position
+  local tag = ("%s owner=%s at=(%.0f,%.0f)"):format(tostring(m:GetAttribute("RoadTemplateName")), tostring(m:GetAttribute("PlacementOwnerUserId")), p.X, p.Z)
+  local snap = {}
+  for _, a in ipairs(WATCH) do snap[#snap + 1] = a .. "=" .. fmt(m:GetAttribute(a)) end
+  lines[#lines + 1] = ("%.3f ADSNAP %s | %s"):format(workspace:GetServerTimeNow(), tag, table.concat(snap, ", "))
+  for _, a in ipairs(WATCH) do
+    conns[#conns + 1] = m:GetAttributeChangedSignal(a):Connect(function()
+      lines[#lines + 1] = ("%.3f ADATTR %s | %s=%s"):format(workspace:GetServerTimeNow(), tag, a, fmt(m:GetAttribute(a)))
+    end)
+  end
+end
+local placed = workspace:FindFirstChild("PlacedRoads")
+if placed then
+  for _, m in ipairs(placed:GetChildren()) do pcall(watchBuilding, m) end
+  conns[#conns + 1] = placed.ChildAdded:Connect(function(m) task.wait(1) pcall(watchBuilding, m) end)
+end
+lines[#lines + 1] = ("-- air defense dilacak: %d"):format(watched)
+
 local running = true
 local function flush() pcall(writefile, OUT, table.concat(lines, "\n") .. "\n") end
 local function stop()
@@ -69,7 +93,7 @@ local function stop()
 end
 if getgenv then getgenv().BC_COMBATLOG_STOP = stop end
 
-print(("bc_combatlog: mendengar %d remote -> %s"):format(#found, OUT))
+print(("bc_combatlog: mendengar %d remote, %d air defense -> %s"):format(#found, watched, OUT))
 task.spawn(function()
   while running do
     task.wait(FLUSH_EVERY)
