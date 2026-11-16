@@ -22,11 +22,13 @@ local function fmt(v, depth)
     local owner = v:GetAttribute("PlacementOwnerUserId")
     return "<" .. v:GetFullName() .. (tmpl and (" tmpl=" .. tostring(tmpl)) or "") .. (owner and (" owner=" .. tostring(owner)) or "") .. ">"
   elseif t == "Vector3" then
-    return ("v3(%.0f,%.0f,%.0f)"):format(v.X, v.Y, v.Z)
+    return ("v3(%.1f,%.1f,%.1f)"):format(v.X, v.Y, v.Z)
   elseif t == "CFrame" then
     return ("cf(%.0f,%.0f,%.0f)"):format(v.X, v.Y, v.Z)
   elseif t == "number" then
-    return ("%.4g"):format(v)
+    if v == math.floor(v) and math.abs(v) < 1e15 then return ("%d"):format(v) end
+    if math.abs(v) >= 1e6 then return ("%.3f"):format(v) end
+    return ("%.5g"):format(v)
   end
   return tostring(v)
 end
@@ -38,7 +40,7 @@ local function listen(remote)
     local args = table.pack(...)
     local parts = {}
     for i = 1, args.n do parts[#parts + 1] = fmt(args[i]) end
-    lines[#lines + 1] = ("%.2f %s %s"):format(workspace:GetServerTimeNow(), remote.Name, table.concat(parts, " | "))
+    lines[#lines + 1] = ("%.3f %s %s"):format(workspace:GetServerTimeNow(), remote.Name, table.concat(parts, " | "))
   end)
 end
 
