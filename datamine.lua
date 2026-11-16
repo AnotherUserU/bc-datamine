@@ -2,6 +2,7 @@
 -- 1) require() tiap ModuleScript di ReplicatedStorage (bagian "bcdump_mod_<Nama>") (tabel lengkap, rekursif)
 -- 2) AirDefenseInfo + bangunan AD/launcher di peta: SEMUA atribut (bagian "bcdump_attrs")
 -- 3) getgc(true): tabel yang punya key reload/cooldown/chance/interval dll (bagian "bcdump_gc")
+-- 4) decompile script bernama patriot/defense/intercept/missile/launcher/... (bagian "bcdump_src")
 -- Semua hasil digabung ke SATU file bcdump_all.txt: dicoba ke /storage/emulated/0/Download, kalau ditolak ke workspace executor.
 local DOWNLOAD_PATH = "/storage/emulated/0/Download/bcdump_all.txt"
 local ALL = {}
@@ -78,23 +79,24 @@ local function dumpAttrs(inst, label)
   table.sort(keys)
   for _, k in ipairs(keys) do attrLines[#attrLines + 1] = ("  %s = %s"):format(k, fmt(attrs[k])) end
 end
+local function norm(x) return (tostring(x):lower():gsub("[^%w]", "")) end
 local adInfo = RS:FindFirstChild("AirDefenseInfo")
-local adTemplate = {}
+local adNorm = {}
 if adInfo then
   for _, c in ipairs(adInfo:GetChildren()) do
     dumpAttrs(c, "AirDefenseInfo." .. c.Name)
-    adTemplate["Placed" .. c.Name] = true
+    adNorm[norm(c.Name)] = true
   end
 end
-local isWeapon = { launch = true, silo = true, rail = true, himars = true, typhon = true }
+local WEAPON_WORDS = { "launch", "silo", "rail", "himars", "typhon", "patriot", "pantsir", "ciws", "irondome", "manpads", "vads", "rapidfire", "aagun", "radar" }
 local done = {}
 for _, m in ipairs(workspace.PlacedRoads:GetChildren()) do
   local n = m.Name
-  local low = n:lower()
-  local weapon = adTemplate[n]
-  for k in pairs(isWeapon) do if low:find(k, 1, true) then weapon = true end end
-  if weapon and not done[n] then
-    done[n] = true
+  local key = norm(n:gsub("^Placed", ""))
+  local weapon = adNorm[key]
+  for _, w in ipairs(WEAPON_WORDS) do if key:find(w, 1, true) then weapon = true end end
+  if weapon and not done[key] then
+    done[key] = true
     dumpAttrs(m, n .. " (owner " .. tostring(m:GetAttribute("PlacementOwnerUserId")) .. ")")
   end
 end
@@ -104,7 +106,9 @@ save("bcdump_attrs.txt", table.concat(attrLines, "\n") .. "\n")
 local gcLines, gcCount = {}, 0
 if getgc then
   local seenT = {}
-  for _, o in ipairs(getgc(true)) do
+  local okGc, objs = pcall(getgc, true)
+  if not okGc or type(objs) ~= "table" then gcLines[1] = "getgc gagal: " .. tostring(objs); objs = {} end
+  for _, o in ipairs(objs) do
     if type(o) == "table" and not seenT[o] then
       local hit = false
       pcall(function()
@@ -123,10 +127,36 @@ if getgc then
 end
 save("bcdump_gc.txt", table.concat(gcLines, "\n") .. "\n")
 
+-- ===== 4) decompile script yang berhubungan dengan senjata/air defense (kalau executor punya decompile) =====
+local SRC_WORDS = { "patriot", "defen", "intercept", "missile", "launcher", "pantsir", "ciws", "radar", "weapon", "combat", "reload" }
+local srcCount, srcLines = 0, {}
+if decompile then
+  local roots = { RS }
+  local lp = game:GetService("Players").LocalPlayer
+  if lp:FindFirstChild("PlayerScripts") then roots[#roots + 1] = lp.PlayerScripts end
+  if lp:FindFirstChild("PlayerGui") then roots[#roots + 1] = lp.PlayerGui end
+  for _, root in ipairs(roots) do
+    for _, sc in ipairs(root:GetDescendants()) do
+      if sc:IsA("LuaSourceContainer") then
+        local low, hit = sc.Name:lower(), false
+        for _, w in ipairs(SRC_WORDS) do if low:find(w, 1, true) then hit = true break end end
+        if hit then
+          local ok, src = pcall(decompile, sc)
+          srcCount = srcCount + 1
+          srcLines[#srcLines + 1] = "== " .. sc:GetFullName() .. "\n" .. (ok and tostring(src) or ("<decompile gagal: " .. tostring(src) .. ">"))
+        end
+      end
+    end
+  end
+else
+  srcLines[1] = "executor tidak punya decompile"
+end
+save("bcdump_src.txt", table.concat(srcLines, "\n\n") .. "\n")
+
 -- satu file gabungan: coba langsung ke folder Download (Android); kalau executor menolak, ke workspace
 local allText = table.concat(ALL, "\n")
 local savedTo = "workspace executor/bcdump_all.txt"
 if not pcall(writefile, DOWNLOAD_PATH, allText) then pcall(writefile, "bcdump_all.txt", allText) else savedTo = DOWNLOAD_PATH end
 print("bc_dump: file gabungan -> " .. savedTo)
-print(("bc_dump: %d module, %d gagal, %d baris atribut, %d tabel getgc"):format(okMods, #failMods, #attrLines, gcCount))
+print(("bc_dump: %d module, %d gagal, %d baris atribut, %d tabel getgc, %d script didecompile"):format(okMods, #failMods, #attrLines, gcCount, srcCount))
 for _, f in ipairs(failMods) do print("  gagal: " .. f) end
