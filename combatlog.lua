@@ -45,7 +45,7 @@ local function listen(remote)
 end
 
 -- semua RemoteEvent di folder remote yang berhubungan dengan pertempuran
-local WORDS = { "patriot", "missile", "radar", "intercept", "combat", "ciws", "defen", "launch" }
+local WORDS = { "patriot", "missile", "radar", "intercept", "combat", "ciws", "defen", "launch", "naval", "ship", "torpedo" }
 local found = {}
 for _, f in ipairs(RS:GetChildren()) do
   local low = f.Name:lower()
