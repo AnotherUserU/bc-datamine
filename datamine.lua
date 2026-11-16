@@ -2,7 +2,13 @@
 -- 1) require() tiap ModuleScript di ReplicatedStorage -> bcdump_mod_<Nama>.txt (tabel lengkap, rekursif)
 -- 2) AirDefenseInfo + bangunan AD/launcher di peta: SEMUA atribut -> bcdump_attrs.txt
 -- 3) getgc(true): tabel yang punya key reload/cooldown/chance/interval dll -> bcdump_gc.txt
--- File muncul di folder workspace executor. Ringkasan di console.
+-- File muncul di folder workspace executor. Semua juga digabung ke bcdump_all.txt (satu file, gampang dipindah).
+local ALL = {}
+local function save(name, text)
+  ALL[#ALL + 1] = "##### " .. name .. "
+" .. text
+  pcall(writefile, name, text)
+end
 local MAX_DEPTH, MAX_LINES = 8, 200000
 local GC_KEY_WORDS = { "reload", "cooldown", "chance", "interval", "firerate", "salvo", "intercept", "ammo", "magazine" }
 local function interestingKey(k)
@@ -56,7 +62,7 @@ for _, m in ipairs(RS:GetDescendants()) do
     if ok then
       okMods = okMods + 1
       local body = type(res) == "table" and serialize(res) or fmt(res)
-      pcall(writefile, "bcdump_mod_" .. safeName(m.Name) .. ".txt", "-- " .. m:GetFullName() .. "\n" .. body .. "\n")
+      save("bcdump_mod_" .. safeName(m.Name) .. ".txt", "-- " .. m:GetFullName() .. "\n" .. body .. "\n")
     else
       failMods[#failMods + 1] = m:GetFullName() .. " : " .. tostring(res)
     end
@@ -93,7 +99,7 @@ for _, m in ipairs(workspace.PlacedRoads:GetChildren()) do
     dumpAttrs(m, n .. " (owner " .. tostring(m:GetAttribute("PlacementOwnerUserId")) .. ")")
   end
 end
-pcall(writefile, "bcdump_attrs.txt", table.concat(attrLines, "\n") .. "\n")
+save("bcdump_attrs.txt", table.concat(attrLines, "\n") .. "\n")
 
 -- ===== 3) getgc =====
 local gcLines, gcCount = {}, 0
@@ -116,7 +122,9 @@ if getgc then
     end
   end
 end
-pcall(writefile, "bcdump_gc.txt", table.concat(gcLines, "\n") .. "\n")
+save("bcdump_gc.txt", table.concat(gcLines, "\n") .. "\n")
 
+pcall(writefile, "bcdump_all.txt", table.concat(ALL, "
+"))
 print(("bc_dump: %d module, %d gagal, %d baris atribut, %d tabel getgc"):format(okMods, #failMods, #attrLines, gcCount))
 for _, f in ipairs(failMods) do print("  gagal: " .. f) end
