@@ -1,13 +1,12 @@
 -- Build and Conquer: datamine lengkap untuk executor INTERNAL. READ ONLY (hanya membaca & menulis file).
--- 1) require() tiap ModuleScript di ReplicatedStorage -> bcdump_mod_<Nama>.txt (tabel lengkap, rekursif)
--- 2) AirDefenseInfo + bangunan AD/launcher di peta: SEMUA atribut -> bcdump_attrs.txt
--- 3) getgc(true): tabel yang punya key reload/cooldown/chance/interval dll -> bcdump_gc.txt
--- File muncul di folder workspace executor. Semua juga digabung ke bcdump_all.txt (satu file, gampang dipindah).
+-- 1) require() tiap ModuleScript di ReplicatedStorage (bagian "bcdump_mod_<Nama>") (tabel lengkap, rekursif)
+-- 2) AirDefenseInfo + bangunan AD/launcher di peta: SEMUA atribut (bagian "bcdump_attrs")
+-- 3) getgc(true): tabel yang punya key reload/cooldown/chance/interval dll (bagian "bcdump_gc")
+-- Semua hasil digabung ke SATU file bcdump_all.txt: dicoba ke /storage/emulated/0/Download, kalau ditolak ke workspace executor.
+local DOWNLOAD_PATH = "/storage/emulated/0/Download/bcdump_all.txt"
 local ALL = {}
 local function save(name, text)
-  ALL[#ALL + 1] = "##### " .. name .. "
-" .. text
-  pcall(writefile, name, text)
+  ALL[#ALL + 1] = "##### " .. name .. "\n" .. text
 end
 local MAX_DEPTH, MAX_LINES = 8, 200000
 local GC_KEY_WORDS = { "reload", "cooldown", "chance", "interval", "firerate", "salvo", "intercept", "ammo", "magazine" }
@@ -124,7 +123,10 @@ if getgc then
 end
 save("bcdump_gc.txt", table.concat(gcLines, "\n") .. "\n")
 
-pcall(writefile, "bcdump_all.txt", table.concat(ALL, "
-"))
+-- satu file gabungan: coba langsung ke folder Download (Android); kalau executor menolak, ke workspace
+local allText = table.concat(ALL, "\n")
+local savedTo = "workspace executor/bcdump_all.txt"
+if not pcall(writefile, DOWNLOAD_PATH, allText) then pcall(writefile, "bcdump_all.txt", allText) else savedTo = DOWNLOAD_PATH end
+print("bc_dump: file gabungan -> " .. savedTo)
 print(("bc_dump: %d module, %d gagal, %d baris atribut, %d tabel getgc"):format(okMods, #failMods, #attrLines, gcCount))
 for _, f in ipairs(failMods) do print("  gagal: " .. f) end
