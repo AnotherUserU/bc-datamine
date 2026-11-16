@@ -3,11 +3,14 @@
 -- 2) AirDefenseInfo + bangunan AD/launcher di peta: SEMUA atribut (bagian "bcdump_attrs")
 -- 3) getgc(true): tabel yang punya key reload/cooldown/chance/interval dll (bagian "bcdump_gc")
 -- 4) decompile script bernama patriot/defense/intercept/missile/launcher/... (bagian "bcdump_src")
--- Semua hasil digabung ke SATU file bcdump_all.txt: dicoba ke /storage/emulated/0/Download, kalau ditolak ke workspace executor.
+-- 5) status live semua air defense/launcher di server: amunisi, magazine, ReadyAt (bagian "bcdump_ad_live")
+-- Tiap bagian ditulis sebagai file sendiri (seperti versi awal) DAN digabung ke bcdump_all.txt.
+-- bcdump_all.txt dicoba ke /storage/emulated/0/Download, kalau ditolak ke workspace executor.
 local DOWNLOAD_PATH = "/storage/emulated/0/Download/bcdump_all.txt"
 local ALL = {}
 local function save(name, text)
   ALL[#ALL + 1] = "##### " .. name .. "\n" .. text
+  pcall(writefile, name, text)
 end
 local MAX_DEPTH, MAX_LINES = 8, 200000
 local GC_KEY_WORDS = { "reload", "cooldown", "chance", "interval", "firerate", "salvo", "intercept", "ammo", "magazine" }
@@ -89,18 +92,32 @@ if adInfo then
   end
 end
 local WEAPON_WORDS = { "launch", "silo", "rail", "himars", "typhon", "patriot", "pantsir", "ciws", "irondome", "manpads", "vads", "rapidfire", "aagun", "radar" }
-local done = {}
-for _, m in ipairs(workspace.PlacedRoads:GetChildren()) do
-  local n = m.Name
-  local key = norm(n:gsub("^Placed", ""))
-  local weapon = adNorm[key]
+local placedRoot = workspace:FindFirstChild("PlacedRoads")
+local placed = placedRoot and placedRoot:GetChildren() or {}
+attrLines[#attrLines + 1] = ("-- workspace.PlacedRoads: %d bangunan terlihat (bangunan jauh bisa belum ter-stream)"):format(#placed)
+local done, liveRows = {}, {}
+local LIVE_ATTRS = { "PatriotAmmo", "PatriotMagazine", "PatriotReadyAt", "PatriotResupplying", "PatriotEnabled", "Health", "Operational" }
+for _, m in ipairs(placed) do
+  local tmpl = m:GetAttribute("RoadTemplateName") or m.Name:gsub("^Placed", "")
+  local key = norm(tmpl)
+  local weapon = adNorm[key] or m:GetAttribute("PatriotMagazine") ~= nil
   for _, w in ipairs(WEAPON_WORDS) do if key:find(w, 1, true) then weapon = true end end
-  if weapon and not done[key] then
-    done[key] = true
-    dumpAttrs(m, n .. " (owner " .. tostring(m:GetAttribute("PlacementOwnerUserId")) .. ")")
+  if weapon then
+    -- satu dump atribut lengkap per jenis
+    if not done[key] then
+      done[key] = true
+      dumpAttrs(m, tostring(tmpl) .. " (owner " .. tostring(m:GetAttribute("PlacementOwnerUserId")) .. ")")
+    end
+    -- status live semua bangunan senjata
+    local row = { tostring(tmpl), tostring(m:GetAttribute("PlacementOwnerUserId")) }
+    for _, a in ipairs(LIVE_ATTRS) do row[#row + 1] = tostring(m:GetAttribute(a)) end
+    liveRows[#liveRows + 1] = table.concat(row, ",")
   end
 end
 save("bcdump_attrs.txt", table.concat(attrLines, "\n") .. "\n")
+table.sort(liveRows)
+save("bcdump_ad_live.txt", ("serverTime=%s\nTemplate,Owner,%s\n"):format(tostring(workspace:GetServerTimeNow()), table.concat(LIVE_ATTRS, ","))
+  .. table.concat(liveRows, "\n") .. "\n")
 
 -- ===== 3) getgc =====
 local gcLines, gcCount = {}, 0
