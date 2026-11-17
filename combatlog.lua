@@ -86,6 +86,31 @@ local function watchBuilding(m)
     end)
   end
 end
+-- StreamingEnabled: bangunan jauh dari kamera belum dimuat. RequestStreamAroundAsync (API resmi Roblox untuk
+-- client) meminta server mengirim area di sekitar titik tertentu; dipanggil untuk 3x3 titik di setiap plot.
+local STREAM_OFFSETS, RESTREAM_EVERY = { -200, 0, 200 }, 90
+local function streamAllPlots()
+  local plots = workspace:FindFirstChild("Plots")
+  if not plots then return 0 end
+  local lp = game:GetService("Players").LocalPlayer
+  local n = 0
+  for _, plot in ipairs(plots:GetChildren()) do
+    local ok, center = pcall(function() return plot:IsA("BasePart") and plot.Position or plot:GetPivot().Position end)
+    if ok and center then
+      for _, dx in ipairs(STREAM_OFFSETS) do
+        for _, dz in ipairs(STREAM_OFFSETS) do
+          if pcall(lp.RequestStreamAroundAsync, lp, center + Vector3.new(dx, 0, dz), 10) then n = n + 1 end
+        end
+      end
+    end
+  end
+  return n
+end
+if workspace.StreamingEnabled then
+  local n = streamAllPlots()
+  lines[#lines + 1] = ("-- stream request: %d titik"):format(n)
+end
+
 local placed = workspace:FindFirstChild("PlacedRoads")
 if placed then
   for _, m in ipairs(placed:GetChildren()) do pcall(watchBuilding, m) end
@@ -116,3 +141,12 @@ task.spawn(function()
     if running then flush() end
   end
 end)
+-- area yang ter-stream bisa dilepas lagi oleh Roblox; minta ulang berkala (bangunan baru ditangkap ChildAdded)
+if workspace.StreamingEnabled then
+  task.spawn(function()
+    while running do
+      task.wait(RESTREAM_EVERY)
+      if running then pcall(streamAllPlots) end
+    end
+  end)
+end

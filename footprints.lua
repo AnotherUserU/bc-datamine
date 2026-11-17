@@ -14,6 +14,22 @@ pcall(function()
   end
 end)
 
+-- muat bangunan di semua plot dulu (StreamingEnabled): 3x3 titik per plot lewat RequestStreamAroundAsync
+if workspace.StreamingEnabled and workspace:FindFirstChild("Plots") then
+  local lp = game:GetService("Players").LocalPlayer
+  for _, plot in ipairs(workspace.Plots:GetChildren()) do
+    local ok, c = pcall(function() return plot:IsA("BasePart") and plot.Position or plot:GetPivot().Position end)
+    if ok then
+      for _, dx in ipairs({ -200, 0, 200 }) do
+        for _, dz in ipairs({ -200, 0, 200 }) do
+          pcall(lp.RequestStreamAroundAsync, lp, c + Vector3.new(dx, 0, dz), 10)
+        end
+      end
+    end
+  end
+  task.wait(2)
+end
+
 local placed = workspace:FindFirstChild("PlacedRoads")
 if not placed then error("workspace.PlacedRoads tidak ada") end
 local added, seen = 0, 0
