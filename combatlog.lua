@@ -1,10 +1,19 @@
 -- Build and Conquer: combat logger untuk mengukur hit chance air defense. READ ONLY (hanya mendengar event).
 -- Mencatat setiap event dari server tentang interceptor & rudal (peluncuran interceptor, rudal dicegat,
 -- efek rudal) lengkap dengan isinya + waktu, supaya rasio intercept per air defense bisa dihitung.
--- Biarkan jalan selama perang. Ditulis tiap 5 dtk ke bc_combatlog.txt (workspace executor).
--- Jalankan lagi = logger lama dimatikan dulu.
-local OUT, FLUSH_EVERY, MAX_DEPTH = "bc_combatlog.txt", 5, 4
+-- Biarkan jalan selama perang. Ditambahkan tiap 5 dtk ke bccombat/<waktu>_<server>.txt (workspace executor),
+-- satu file per sesi, jadi log lama tidak tertimpa. Aman untuk auto-execute: hanya jalan di Build and Conquer
+-- dan menunggu game selesai dimuat. Jalankan lagi = logger lama dimatikan dulu.
+local GAME_ID, OUT_DIR, FLUSH_EVERY, MAX_DEPTH = 10757247806, "bccombat", 5, 4
+if game.GameId ~= GAME_ID then return end
+if not game:IsLoaded() then game.Loaded:Wait() end
 local RS = game:GetService("ReplicatedStorage")
+RS:WaitForChild("PatriotRemotes", 60)
+RS:WaitForChild("MissileRemotes", 60)
+workspace:WaitForChild("PlacedRoads", 60)
+task.wait(5) -- beri waktu bangunan sekitar ter-stream
+pcall(makefolder, OUT_DIR)
+local OUT = ("%s/%s_%s.txt"):format(OUT_DIR, os.date("%Y%m%d_%H%M%S"), tostring(game.JobId):sub(1, 8))
 
 if getgenv and getgenv().BC_COMBATLOG_STOP then pcall(getgenv().BC_COMBATLOG_STOP) end
 
@@ -85,7 +94,14 @@ end
 lines[#lines + 1] = ("-- air defense dilacak: %d"):format(watched)
 
 local running = true
-local function flush() pcall(writefile, OUT, table.concat(lines, "\n") .. "\n") end
+-- tambahkan baris baru saja lalu kosongkan buffer (memori tidak terus membesar di sesi panjang)
+local started = false
+local function flush()
+  if #lines == 0 then return end
+  local chunk = table.concat(lines, "\n") .. "\n"
+  lines = {}
+  if started and appendfile then pcall(appendfile, OUT, chunk) else pcall(writefile, OUT, chunk); started = true end
+end
 local function stop()
   running = false
   for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
