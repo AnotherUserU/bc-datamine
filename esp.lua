@@ -23,7 +23,6 @@ local RESCAN_DEBOUNCE = 1      -- dtk setelah bangunan/kapal bertambah/berkurang
 local STREAM_EVERY = 90        -- dtk, minta server mengirim semua plot lagi
 local LABEL_UP = 4             -- stud di atas bangunan
 local SUB_DIVE_Z = 1.5         -- ShipMotion.Z di atas ini = menyelam (sama dengan game)
-local LIMITS = { 0, 1, 2, 4, 6, 8, 10, 12, 16, 20, 24, 30, 40, 50, 60, 100 }   -- 0 = Auto (sampai game penuh)
 
 local TEMPLATE_KIND = {}
 local function addKind(kind, list) for _, t in ipairs(list) do TEMPLATE_KIND[t] = kind end end
@@ -72,7 +71,7 @@ local conns = {}
 local entries = {}            -- model -> entry
 local playerOn = {}           -- UserId -> false kalau dimatikan
 local baseKey = nil
-local limitIdx = 1
+local markLimit = 0           -- diketik di panel; 0 / kosong = Auto (sampai game bilang penuh)
 local statusText = "Siap"
 local afkCount = 0            -- berapa kali kick idle Roblox (20 menit) dicegah
 local renderPanel             -- didefinisikan di bagian panel
@@ -312,8 +311,7 @@ end
 local function mark()
   local fn = findAssign()
   if not fn then statusText = "assignTarget tidak ketemu (buka targeting rudal dulu)" return end
-  local limit = LIMITS[limitIdx]
-  if limit == 0 then limit = math.huge end
+  local limit = markLimit > 0 and markLimit or math.huge
   local list = candidates()
   local n, skipped, stopMsg = 0, 0, nil
   repeat
@@ -414,7 +412,22 @@ local baseRow = row("", function()
   local nxt = list[idx + 1]
   baseKey = nxt and nxt.key or nil
 end)
-local limitRow = row("", function() limitIdx = limitIdx % #LIMITS + 1 end)
+-- Limit diketik bebas (angka berapa saja); kosong / 0 = Auto
+local limitRow = row("Limit MARK:")
+local limitBox = Instance.new("TextBox")
+limitBox.Size, limitBox.Position = UDim2.fromOffset(110, ROW - 4), UDim2.fromOffset(W - 126, 2)
+limitBox.BackgroundColor3, limitBox.BorderSizePixel = Color3.fromRGB(40, 38, 52), 0
+limitBox.Font, limitBox.TextSize, limitBox.TextColor3 = Enum.Font.GothamBold, 13, Color3.new(1, 1, 1)
+limitBox.PlaceholderText, limitBox.PlaceholderColor3 = "Auto", Color3.fromRGB(140, 140, 140)
+limitBox.ClearTextOnFocus, limitBox.Text = false, ""
+limitBox.Parent = limitRow.b
+table.insert(conns, limitBox.FocusLost:Connect(function()
+  local n = tonumber((limitBox.Text:gsub("%D", "")))
+  markLimit = (n and n > 0) and math.floor(n) or 0
+  limitBox.Text = markLimit > 0 and tostring(markLimit) or ""
+  statusText = "Limit MARK: " .. (markLimit > 0 and tostring(markLimit) or "Auto")
+  renderPanel()
+end))
 local fillRow = row("", function() opt.fill = not opt.fill end)
 local streamRow = row("", function() opt.stream = not opt.stream end)
 local afkRow = row("", function() opt.afk = not opt.afk end)
@@ -460,8 +473,6 @@ renderPanel = function()
   end
   local b = selectedBase()
   baseRow.b.Text = "Base: " .. (b and b.name or "All")
-  local l = LIMITS[limitIdx]
-  limitRow.b.Text = "Limit: " .. (l == 0 and "Auto" or tostring(l)) .. "  (klik = ganti)"
   fillRow.b.Text = "Fill Slots: " .. (opt.fill and "ON" or "OFF")
   streamRow.b.Text = ("Muat semua plot tiap %ds: %s"):format(STREAM_EVERY, opt.stream and "ON" or "OFF")
   afkRow.b.Text = ("Anti AFK: %s%s"):format(opt.afk and "ON" or "OFF",
