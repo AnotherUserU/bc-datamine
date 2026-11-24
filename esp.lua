@@ -5,6 +5,7 @@
 -- Auto-mark memanggil fungsi game sendiri (MissileTargeting.assignTarget) lewat getgc: tidak ada klik mouse,
 -- target tidak harus ada di layar, dan aturan game (limit, range, PVP, sekutu) tetap berlaku.
 -- Cara pakai: buka targeting rudal + pilih munisi di game, lalu tekan MARK (atau "=").
+-- Anti AFK (default ON) mencegah kick idle 20 menit bawaan Roblox.
 -- Tombol: Insert = sembunyikan panel, "=" = MARK, "-" = scan ulang, Numpad1.. = on/off kategori.
 if game.GameId ~= 10757247806 then return end
 if _G.BC_ESP_INT then pcall(_G.BC_ESP_INT.stop) end
@@ -63,7 +64,7 @@ local CATS = {
 }
 local CAT = {}
 for i, c in ipairs(CATS) do CAT[c.id], c.idx = c, i end
-local opt = { mine = false, hideDead = true, fill = false, stream = true }
+local opt = { mine = false, hideDead = true, fill = false, stream = true, afk = true }
 local MINE_COLOR, DEAD_COLOR = Color3.fromRGB(80, 220, 80), Color3.fromRGB(150, 150, 150)
 
 local alive = true
@@ -73,6 +74,7 @@ local playerOn = {}           -- UserId -> false kalau dimatikan
 local baseKey = nil
 local limitIdx = 1
 local statusText = "Siap"
+local afkCount = 0            -- berapa kali kick idle Roblox (20 menit) dicegah
 local renderPanel             -- didefinisikan di bagian panel
 
 local function attr(i, k)
@@ -415,6 +417,7 @@ end)
 local limitRow = row("", function() limitIdx = limitIdx % #LIMITS + 1 end)
 local fillRow = row("", function() opt.fill = not opt.fill end)
 local streamRow = row("", function() opt.stream = not opt.stream end)
+local afkRow = row("", function() opt.afk = not opt.afk end)
 local markRow = row(">> MARK  [=]", function() mark() end)
 markRow.b.TextColor3 = Color3.fromRGB(255, 220, 80)
 local fullRescan               -- didefinisikan di bagian scan
@@ -461,6 +464,8 @@ renderPanel = function()
   limitRow.b.Text = "Limit: " .. (l == 0 and "Auto" or tostring(l)) .. "  (klik = ganti)"
   fillRow.b.Text = "Fill Slots: " .. (opt.fill and "ON" or "OFF")
   streamRow.b.Text = ("Muat semua plot tiap %ds: %s"):format(STREAM_EVERY, opt.stream and "ON" or "OFF")
+  afkRow.b.Text = ("Anti AFK: %s%s"):format(opt.afk and "ON" or "OFF",
+    afkCount > 0 and (" (dicegah %dx)"):format(afkCount) or "")
   statusRow.b.Text = statusText
   local shown = 0
   for _, r in ipairs(rows) do if r.b.Visible then shown = shown + 1 end end
@@ -518,6 +523,18 @@ local function watch(name)
 end
 watch("PlacedRoads")
 watch("Ships")
+
+-- Anti AFK: Roblox menembak Players.LocalPlayer.Idled sebelum kick idle 20 menit; klik kanan virtual
+-- (VirtualUser) dihitung sebagai input sehingga timer idle mulai dari nol. Game ini tidak punya AFK kick sendiri.
+local VirtualUser = game:GetService("VirtualUser")
+table.insert(conns, lp.Idled:Connect(function()
+  if not opt.afk then return end
+  pcall(function()
+    VirtualUser:CaptureController()
+    VirtualUser:ClickButton2(Vector2.new())
+  end)
+  afkCount = afkCount + 1
+end))
 
 local NUMPAD = { Enum.KeyCode.KeypadOne, Enum.KeyCode.KeypadTwo, Enum.KeyCode.KeypadThree, Enum.KeyCode.KeypadFour,
   Enum.KeyCode.KeypadFive, Enum.KeyCode.KeypadSix, Enum.KeyCode.KeypadSeven, Enum.KeyCode.KeypadEight }
