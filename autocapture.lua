@@ -47,11 +47,29 @@ local assign = {}              -- unit -> { zone, slot, orderedAt, lastPos, leg 
 local conns = {}
 local statusText = "OFF"
 local lastResult = ""          -- jawaban server terakhir (state + alasan)
+local debugOn = true
+local DEBUG_UNITS = 8          -- maks unit yang tampil di panel debug
+
+-- ===== debug: log ke panel (6 baris terakhir) + file bc_capture_log.txt di workspace executor =====
+local LOG_FILE = "bc_capture_log.txt"
+local logLines = {}
+local tickN, lastTickAt = 0, os.clock()
+local function log(msg)
+  local line = os.date("%H:%M:%S") .. " " .. msg
+  logLines[#logLines + 1] = line
+  if #logLines > 6 then table.remove(logLines, 1) end
+  pcall(function()
+    if isfile and isfile(LOG_FILE) then appendfile(LOG_FILE, line .. "\n") else writefile(LOG_FILE, line .. "\n") end
+  end)
+end
+log("=== script mulai ===")
 
 local function attr(i, k)
   local ok, v = pcall(i.GetAttribute, i, k)
   return ok and v or nil
 end
+
+local function unitName(u) return tostring(attr(u, "UnitName") or u.Name) end
 
 local function zoneTitle(z)
   local t = ZoneTypes.Get(z.Name)
@@ -149,12 +167,18 @@ local function onOrderStatus(p)
     if type(r) == "table" then
       local a = r.unit and assign[r.unit]
       local st = tostring(r.state)
-      if a and st ~= "Moving" and st ~= "Queued" then
-        a.leg = math.max(LEG_MIN, math.floor(a.leg / 2))
-        a.orderedAt = 0          -- coba lagi tick berikutnya dengan langkah lebih pendek
-      end
       local why = r.reason or r.message or r.error
       if why then reasons[#reasons + 1] = tostring(why) end
+      if a then
+        a.result = st .. (why and (" (" .. tostring(why) .. ")") or "")
+        if st ~= "Moving" and st ~= "Queued" then
+          a.leg = math.max(LEG_MIN, math.floor(a.leg / 2))
+          a.orderedAt = 0        -- coba lagi tick berikutnya dengan langkah lebih pendek
+          log(("SERVER %s: %s -> langkah jadi %d stud"):format(unitName(r.unit), a.result, a.leg))
+        else
+          a.leg = math.min(LEG, a.leg * 2)   -- berhasil: langkah dipanjangkan lagi
+        end
+      end
     end
   end
   lastResult = ("%s: %s moving, %s blocked%s"):format(tostring(p.state), tostring(p.moving or 0),
@@ -163,15 +187,21 @@ end
 pcall(function() table.insert(conns, GameActions.UnitOrderStatusChanged:Connect(onOrderStatus)) end)
 
 -- ===== pembagian unit =====
-local function release(u) assign[u] = nil end
+local function release(u, why)
+  log(("LEPAS %s: %s"):format(unitName(u), why))
+  assign[u] = nil
+end
 
 local function evaluate()
+  tickN, lastTickAt = tickN + 1, os.clock()
   local units = myUnits()
   local byUnit = {}
   for _, e in ipairs(units) do byUnit[e.unit] = e end
   for u, a in pairs(assign) do
-    if not byUnit[u] or not a.zone.Parent or zoneOn[a.zone] == false or (not garrison and zoneMine(a.zone)) then
-      release(u)
+    if not byUnit[u] then release(u, "unit hilang / hancur / bukan milikmu lagi")
+    elseif not a.zone.Parent then release(u, "zona hilang (tidak ter-stream)")
+    elseif zoneOn[a.zone] == false then release(u, "zona dimatikan di panel")
+    elseif not garrison and zoneMine(a.zone) then release(u, "zona sudah direbut, pindah ke zona lain")
     end
   end
   local count = {}
@@ -189,7 +219,8 @@ local function evaluate()
         end
         local e = table.remove(pool, best)
         count[z] = (count[z] or 0) + 1
-        assign[e.unit] = { zone = z, slot = count[z], orderedAt = 0, leg = LEG }
+        assign[e.unit] = { zone = z, slot = count[z], orderedAt = 0, leg = LEG, state = "baru", result = "-" }
+        log(("TUGAS %s -> %s (%d stud)"):format(unitName(e.unit), (zoneTitle(z)), math.floor(bd)))
         need = need - 1
       end
     end
@@ -200,14 +231,36 @@ local function evaluate()
     local e = byUnit[u]
     local moving = a.lastPos and (e.pos - a.lastPos).Magnitude > STILL_STUD
     a.lastPos = e.pos
-    if not inside(a.zone, e.pos) and not moving and now - a.orderedAt >= REORDER_MIN then
-      orders[#orders + 1] = { unit = u, position = nextStep(a, e.pos) }
-      a.orderedAt = now
+    a.dist = math.floor(Vector3.new(a.zone.Position.X - e.pos.X, 0, a.zone.Position.Z - e.pos.Z).Magnitude)
+    local inZone = inside(a.zone, e.pos)
+    if inZone then
+      if a.state ~= "SAMPAI" then log(("SAMPAI %s di %s"):format(unitName(u), (zoneTitle(a.zone)))) end
+      a.state = "SAMPAI"
+    elseif moving then
+      a.state = "jalan"
+    else
+      a.state = "diam"
+      if now - a.orderedAt >= REORDER_MIN then
+        orders[#orders + 1] = { unit = u, position = nextStep(a, e.pos) }
+        a.orderedAt = now
+        a.state = "diperintah"
+      else
+        a.state = ("diam, tunggu %ds"):format(math.ceil(REORDER_MIN - (now - a.orderedAt)))
+      end
     end
   end
   if #orders > 0 then
     local ok, res = pcall(GameActions.OrderUnits, orders, "Move")
-    if not ok then statusText = "Order ERR: " .. tostring(res) return end
+    if not ok then
+      statusText = "Order ERR: " .. tostring(res)
+      log("ERROR OrderUnits: " .. tostring(res))
+      return
+    end
+    for _, o in ipairs(orders) do
+      local a = assign[o.unit]
+      log(("PERINTAH %s langkah %d stud, sisa %d stud ke %s"):format(unitName(o.unit), a.leg, a.dist, (zoneTitle(a.zone))))
+    end
+    if res == false then log("OrderUnits menolak (return false)") end
   end
   local n, legs = 0, {}
   for _, a in pairs(assign) do n = n + 1 legs[#legs + 1] = a.leg end
@@ -252,7 +305,13 @@ end
 local render
 local title = row("BC Auto Capture  [Delete]  (seret)")
 title.TextColor3 = Color3.new(1, 1, 1)
-local onRow = row("", function() enabled = not enabled; assign = {}; render() end)
+local onRow = row("", function()
+  enabled = not enabled
+  assign = {}
+  lastTickAt = os.clock()
+  log("Auto Capture " .. (enabled and "ON" or "OFF"))
+  render()
+end)
 local garRow = row("", function() garrison = not garrison render() end)
 local perRow = row("Unit per zona:")
 local perBox = Instance.new("TextBox")
@@ -266,6 +325,7 @@ table.insert(conns, perBox.FocusLost:Connect(function()
   perZone = (n and n > 0) and math.floor(n) or perZone
   perBox.Text = tostring(perZone)
   assign = {}                -- bagi ulang dengan jumlah baru
+  log("Unit per zona = " .. perZone .. " (semua unit dibagi ulang)")
 end))
 local rewardRow = row("Private server: zona TIDAK memberi hadiah")
 rewardRow.TextColor3 = Color3.fromRGB(255, 130, 130)
@@ -274,7 +334,10 @@ local zoneRows, zoneAt = {}, {}  -- zoneAt[i] = zona yang tampil di baris i
 for i = 1, MAX_ZONES do
   zoneRows[i] = row("", function()
     local z = zoneAt[i]
-    if z then zoneOn[z] = zoneOn[z] == false end
+    if z then
+      zoneOn[z] = zoneOn[z] == false
+      log(("Zona %s %s (semua unit dibagi ulang)"):format((zoneTitle(z)), zoneOn[z] == false and "dimatikan" or "dinyalakan"))
+    end
     assign = {}
     render()
   end)
@@ -283,6 +346,14 @@ local statusRow = row("")
 statusRow.TextColor3 = Color3.fromRGB(150, 150, 150)
 statusRow.TextWrapped, statusRow.TextYAlignment = true, Enum.TextYAlignment.Top
 statusRow.Size = UDim2.fromOffset(W, ROW * 4)
+-- detak loop: diperbarui oleh loop terpisah, jadi kalau loop utama mati tetap kelihatan
+local beatRow = row("")
+local dbgToggle = row("", function() debugOn = not debugOn render() end)
+local dbgRow = row("")
+dbgRow.Font, dbgRow.TextSize = Enum.Font.Code, 12
+dbgRow.TextColor3 = Color3.fromRGB(190, 230, 190)
+dbgRow.TextWrapped, dbgRow.TextYAlignment = true, Enum.TextYAlignment.Top
+dbgRow.Size = UDim2.fromOffset(W, ROW * 14)
 
 render = function()
   onRow.Text = ">> Auto Capture: " .. (enabled and "ON" or "OFF")
@@ -306,6 +377,22 @@ render = function()
   end
   statusRow.Text = enabled and statusText
     or ("OFF. %d zona darat ditemukan%s"):format(#list, #list == 0 and " (arahkan kamera ke tengah map)" or "")
+  dbgToggle.Text = "Debug: " .. (debugOn and "ON" or "OFF") .. "  (log: " .. LOG_FILE .. ")"
+  dbgRow.Visible = debugOn
+  if debugOn then
+    local lines = {}
+    local shown = 0
+    for u, a in pairs(assign) do
+      shown = shown + 1
+      if shown > DEBUG_UNITS then break end
+      lines[#lines + 1] = ("%s > %s | %s | sisa %s | step %d | %s"):format(unitName(u):sub(1, 14),
+        (zoneTitle(a.zone)):sub(1, 10), a.state or "-", tostring(a.dist or "?"), a.leg, a.result or "-")
+    end
+    if shown == 0 then lines[1] = enabled and "(belum ada unit ditugaskan)" or "(Auto Capture OFF)" end
+    lines[#lines + 1] = "-- log --"
+    for _, l in ipairs(logLines) do lines[#lines + 1] = l end
+    dbgRow.Text = table.concat(lines, "\n")
+  end
   local h = 0
   for _, c in ipairs(panel:GetChildren()) do
     if c:IsA("GuiObject") and c.Visible then h = h + c.Size.Y.Offset end
@@ -346,13 +433,31 @@ task.spawn(function()
   while current() and gui.Parent do
     if enabled then
       local ok, err = pcall(evaluate)
-      if not ok then statusText = "ERR: " .. tostring(err) end
+      if not ok then statusText = "ERR: " .. tostring(err) log("ERROR evaluate: " .. tostring(err)) end
     end
     local ok, err = pcall(render)
     if not ok then statusRow.Text = "Panel ERR: " .. tostring(err) end
     task.wait(TICK)
   end
-  stop()                     -- diganti versi baru atau panel dihapus
+  log("loop utama berhenti: " .. (G.BC_CAPTURE_RUN ~= RUN and "diganti versi baru" or "panel dihapus / stop"))
+  stop()
+end)
+
+-- detak terpisah: tunjukkan loop utama masih hidup atau tidak
+task.spawn(function()
+  while alive and gui.Parent do
+    local ago = os.clock() - lastTickAt
+    if not enabled then
+      beatRow.Text, beatRow.TextColor3 = "Loop: hidup (Auto Capture OFF)", Color3.fromRGB(150, 150, 150)
+    elseif ago <= TICK * 3 then
+      beatRow.Text = ("Loop: JALAN  tick #%d  (%.0fs lalu)"):format(tickN, ago)
+      beatRow.TextColor3 = Color3.fromRGB(120, 255, 120)
+    else
+      beatRow.Text = ("Loop: MACET/MATI  tick terakhir %.0fs lalu"):format(ago)
+      beatRow.TextColor3 = Color3.fromRGB(255, 90, 90)
+    end
+    task.wait(1)
+  end
 end)
 
 G.BC_CAPTURE = { stop = stop }
