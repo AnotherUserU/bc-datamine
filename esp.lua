@@ -14,15 +14,14 @@ local G = (getgenv and getgenv()) or _G
 for _, env in ipairs({ G, _G }) do
   if env.BC_ESP_INT then pcall(env.BC_ESP_INT.stop) env.BC_ESP_INT = nil end
 end
-local RUN = {}
-G.BC_ESP_RUN = RUN
-if not game:IsLoaded() then game.Loaded:Wait() end
-do
-  local p = (gethui and gethui()) or game:GetService("CoreGui")
-  for _, old in ipairs(p:GetChildren()) do
-    if old.Name == "BCEspInt" or old.Name == "BCEspIntPanel" then old:Destroy() end
-  end
+-- penanda versi aktif = atribut di folder GUI (dipakai bersama semua eksekusi, getgenv belum tentu)
+local RUN_HOST = (gethui and gethui()) or game:GetService("CoreGui")
+local RUN_ID = ("%04x"):format(math.random(0, 0xffff))
+RUN_HOST:SetAttribute("BCEspRun", RUN_ID)
+for _, old in ipairs(RUN_HOST:GetChildren()) do
+  if old.Name == "BCEspInt" or old.Name == "BCEspIntPanel" then old:Destroy() end
 end
+if not game:IsLoaded() then game.Loaded:Wait() end
 
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
@@ -588,7 +587,7 @@ end
 
 task.spawn(function()
   local lastScan, lastStream, lastPanel = 0, os.clock(), 0
-  while alive and G.BC_ESP_RUN == RUN and gui.Parent do
+  while alive and RUN_HOST:GetAttribute("BCEspRun") == RUN_ID and gui.Parent do
     local now = os.clock()
     if dirty and now - lastScan >= RESCAN_DEBOUNCE then
       dirty, lastScan = false, now

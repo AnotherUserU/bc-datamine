@@ -7,20 +7,21 @@
 -- Perjalanan jauh dipecah per langkah (LEG stud). Kalau server menjawab "blocked", langkah unit itu
 -- diperpendek (setengahnya, min LEG_MIN). Alasan dari server ditampilkan di baris status.
 -- Private server: zona tidak memberi hadiah (atribut workspace.CaptureRewardsOff), ditampilkan di panel.
--- Jalankan ulang = versi lama berhenti sendiri (tidak perlu rejoin): stop() lama dipanggil, panel lama
--- dihapus, dan tiap loop/handler mengecek token RUN; token berganti = berhenti.
+-- Jalankan ulang = versi lama berhenti sendiri (tidak perlu rejoin). Penanda versi aktif disimpan sebagai
+-- ATRIBUT di folder GUI (instance dipakai bersama semua eksekusi, getgenv/_G belum tentu): tiap loop/handler
+-- mengecek atribut itu; berganti = berhenti. Panel lama juga dihapus.
 if game.GameId ~= 10757247806 then return end
 local G = (getgenv and getgenv()) or _G
 for _, env in ipairs({ G, _G }) do
   if env.BC_CAPTURE then pcall(env.BC_CAPTURE.stop) env.BC_CAPTURE = nil end
 end
-local RUN = {}
-G.BC_CAPTURE_RUN = RUN
-if not game:IsLoaded() then game.Loaded:Wait() end
 local GUI_PARENT = (gethui and gethui()) or game:GetService("CoreGui")
+local RUN_ID = ("%04x"):format(math.random(0, 0xffff))
+GUI_PARENT:SetAttribute("BCCaptureRun", RUN_ID)
 for _, old in ipairs(GUI_PARENT:GetChildren()) do
   if old.Name == "BCCapturePanel" then old:Destroy() end
 end
+if not game:IsLoaded() then game.Loaded:Wait() end
 
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
@@ -54,12 +55,14 @@ local DEBUG_UNITS = 8          -- maks unit yang tampil di panel debug
 local LOG_FILE = "bc_capture_log.txt"
 local logLines = {}
 local tickN, lastTickAt = 0, os.clock()
+local phase = "-"              -- langkah yang sedang dikerjakan tick (untuk melacak macet)
 local function log(msg)
-  local line = os.date("%H:%M:%S") .. " " .. msg
+  local line = os.date("%H:%M:%S") .. " [" .. RUN_ID .. "] " .. msg   -- [id] = salinan script yang menulis
   logLines[#logLines + 1] = line
   if #logLines > 6 then table.remove(logLines, 1) end
   pcall(function()
-    if isfile and isfile(LOG_FILE) then appendfile(LOG_FILE, line .. "\n") else writefile(LOG_FILE, line .. "\n") end
+    local ok = appendfile and pcall(appendfile, LOG_FILE, line .. "\n")
+    if not ok then writefile(LOG_FILE, line .. "\n") end
   end)
 end
 log("=== script mulai ===")
@@ -157,7 +160,15 @@ local function nextStep(a, pos)
 end
 
 -- ===== jawaban server: kalau blocked, perpendek langkah =====
-local function current() return alive and G.BC_CAPTURE_RUN == RUN end
+local function current() return alive and GUI_PARENT:GetAttribute("BCCaptureRun") == RUN_ID end
+
+-- jawaban server yang berarti GAGAL (selain ini, mis. Moving/Queued/Arrived, dianggap berhasil)
+local FAIL_WORDS = { "block", "fail", "reject", "invalid", "cancel", "unreach" }
+local function isFail(st)
+  st = st:lower()
+  for _, w in ipairs(FAIL_WORDS) do if st:find(w, 1, true) then return true end end
+  return false
+end
 
 local function onOrderStatus(p)
   if not current() or type(p) ~= "table" or p.state == "Planning" then return end
@@ -171,12 +182,16 @@ local function onOrderStatus(p)
       if why then reasons[#reasons + 1] = tostring(why) end
       if a then
         a.result = st .. (why and (" (" .. tostring(why) .. ")") or "")
-        if st ~= "Moving" and st ~= "Queued" then
+        if isFail(st) then
           a.leg = math.max(LEG_MIN, math.floor(a.leg / 2))
           a.orderedAt = 0        -- coba lagi tick berikutnya dengan langkah lebih pendek
           log(("SERVER %s: %s -> langkah jadi %d stud"):format(unitName(r.unit), a.result, a.leg))
         else
           a.leg = math.min(LEG, a.leg * 2)   -- berhasil: langkah dipanjangkan lagi
+          if st:lower():find("arriv", 1, true) then
+            a.orderedAt = 0      -- sampai di ujung langkah: langkah berikutnya tanpa menunggu
+            log(("SERVER %s: %s (ujung langkah), lanjut"):format(unitName(r.unit), st))
+          end
         end
       end
     end
@@ -194,6 +209,7 @@ end
 
 local function evaluate()
   tickN, lastTickAt = tickN + 1, os.clock()
+  phase = "cari unit"
   local units = myUnits()
   local byUnit = {}
   for _, e in ipairs(units) do byUnit[e.unit] = e end
@@ -206,6 +222,7 @@ local function evaluate()
   end
   local count = {}
   for _, a in pairs(assign) do count[a.zone] = (count[a.zone] or 0) + 1 end
+  phase = "bagi unit ke zona"
   local pool = {}
   for _, e in ipairs(units) do if not assign[e.unit] then pool[#pool + 1] = e end end
   for _, z in ipairs(zones()) do
@@ -226,6 +243,7 @@ local function evaluate()
     end
   end
   -- perintah: unit yang diam dan belum di dalam zona dapat langkah berikutnya
+  phase = "hitung langkah"
   local now, orders = os.clock(), {}
   for u, a in pairs(assign) do
     local e = byUnit[u]
@@ -250,7 +268,9 @@ local function evaluate()
     end
   end
   if #orders > 0 then
+    phase = "kirim OrderUnits"
     local ok, res = pcall(GameActions.OrderUnits, orders, "Move")
+    phase = "catat perintah"
     if not ok then
       statusText = "Order ERR: " .. tostring(res)
       log("ERROR OrderUnits: " .. tostring(res))
@@ -296,7 +316,12 @@ local function row(text, onClick)
   pad.Parent = b
   if onClick then
     b.AutoButtonColor = false
-    b.MouseButton1Click:Connect(onClick)
+    local lastClick = 0      -- emulator bisa mengirim klik ganda (mouse + sentuh): abaikan < 0.35 dtk
+    b.MouseButton1Click:Connect(function()
+      if not current() or os.clock() - lastClick < 0.35 then return end
+      lastClick = os.clock()
+      onClick()
+    end)
   end
   b.Parent = panel
   return b
@@ -429,23 +454,37 @@ local function stop()
   pcall(function() gui:Destroy() end)
 end
 
+-- Loop utama dengan watchdog: tiap tick jalan di thread sendiri. Kalau satu tick tidak selesai dalam
+-- TICK_TIMEOUT dtk, fase terakhirnya dicatat ("MACET di ...") dan loop lanjut dengan tick baru.
+local TICK_TIMEOUT = 20
+local function runTick()
+  if enabled then
+    local ok, err = pcall(evaluate)
+    if not ok then statusText = "ERR: " .. tostring(err) log("ERROR evaluate: " .. tostring(err)) end
+  end
+  phase = "render"
+  local ok, err = pcall(render)
+  if not ok then statusRow.Text = "Panel ERR: " .. tostring(err) end
+  phase = "selesai"
+end
+
 task.spawn(function()
   while current() and gui.Parent do
-    if enabled then
-      local ok, err = pcall(evaluate)
-      if not ok then statusText = "ERR: " .. tostring(err) log("ERROR evaluate: " .. tostring(err)) end
-    end
-    local ok, err = pcall(render)
-    if not ok then statusRow.Text = "Panel ERR: " .. tostring(err) end
+    local done = false
+    phase = "mulai"
+    task.spawn(function() runTick() done = true end)
+    local t0 = os.clock()
+    while not done and os.clock() - t0 < TICK_TIMEOUT do task.wait(0.25) end
+    if not done then log(("MACET di fase '%s' > %ds, tick dilewati"):format(phase, TICK_TIMEOUT)) end
     task.wait(TICK)
   end
-  log("loop utama berhenti: " .. (G.BC_CAPTURE_RUN ~= RUN and "diganti versi baru" or "panel dihapus / stop"))
+  log("loop utama berhenti: " .. (alive and "diganti salinan baru" or "stop"))
   stop()
 end)
 
 -- detak terpisah: tunjukkan loop utama masih hidup atau tidak
 task.spawn(function()
-  while alive and gui.Parent do
+  while alive and gui.Parent and current() do
     local ago = os.clock() - lastTickAt
     if not enabled then
       beatRow.Text, beatRow.TextColor3 = "Loop: hidup (Auto Capture OFF)", Color3.fromRGB(150, 150, 150)
@@ -453,7 +492,7 @@ task.spawn(function()
       beatRow.Text = ("Loop: JALAN  tick #%d  (%.0fs lalu)"):format(tickN, ago)
       beatRow.TextColor3 = Color3.fromRGB(120, 255, 120)
     else
-      beatRow.Text = ("Loop: MACET/MATI  tick terakhir %.0fs lalu"):format(ago)
+      beatRow.Text = ("Loop: MACET/MATI  tick terakhir %.0fs lalu, fase '%s'"):format(ago, phase)
       beatRow.TextColor3 = Color3.fromRGB(255, 90, 90)
     end
     task.wait(1)
