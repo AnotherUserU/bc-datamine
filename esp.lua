@@ -7,9 +7,22 @@
 -- Cara pakai: buka targeting rudal + pilih munisi di game, lalu tekan MARK (atau "=").
 -- Anti AFK (default ON) mencegah kick idle 20 menit bawaan Roblox.
 -- Tombol: Insert = sembunyikan panel, "=" = MARK, "-" = scan ulang, Numpad1.. = on/off kategori.
+-- Jalankan ulang = versi lama berhenti sendiri (tidak perlu rejoin): stop() lama dipanggil, panel + label lama
+-- dihapus, dan loop/handler mengecek token RUN; token berganti = berhenti.
 if game.GameId ~= 10757247806 then return end
-if _G.BC_ESP_INT then pcall(_G.BC_ESP_INT.stop) end
+local G = (getgenv and getgenv()) or _G
+for _, env in ipairs({ G, _G }) do
+  if env.BC_ESP_INT then pcall(env.BC_ESP_INT.stop) env.BC_ESP_INT = nil end
+end
+local RUN = {}
+G.BC_ESP_RUN = RUN
 if not game:IsLoaded() then game.Loaded:Wait() end
+do
+  local p = (gethui and gethui()) or game:GetService("CoreGui")
+  for _, old in ipairs(p:GetChildren()) do
+    if old.Name == "BCEspInt" or old.Name == "BCEspIntPanel" then old:Destroy() end
+  end
+end
 
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
@@ -565,9 +578,17 @@ table.insert(conns, UIS.InputBegan:Connect(function(i, processed)
   end
 end))
 
+local function stop()
+  alive = false
+  for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+  for m in pairs(entries) do dropEntry(m) end
+  pcall(function() holder:Destroy() end)
+  pcall(function() gui:Destroy() end)
+end
+
 task.spawn(function()
   local lastScan, lastStream, lastPanel = 0, os.clock(), 0
-  while alive do
+  while alive and G.BC_ESP_RUN == RUN and gui.Parent do
     local now = os.clock()
     if dirty and now - lastScan >= RESCAN_DEBOUNCE then
       dirty, lastScan = false, now
@@ -581,17 +602,10 @@ task.spawn(function()
     if now - lastPanel >= 1 then lastPanel = now pcall(renderPanel) end
     task.wait(UPDATE_EVERY)
   end
+  stop()                     -- diganti versi baru atau panel dihapus
 end)
 
 renderPanel()
 fullRescan()
 
-_G.BC_ESP_INT = {
-  stop = function()
-    alive = false
-    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-    for m in pairs(entries) do dropEntry(m) end
-    pcall(function() holder:Destroy() end)
-    pcall(function() gui:Destroy() end)
-  end,
-}
+G.BC_ESP_INT = { stop = stop }

@@ -7,9 +7,20 @@
 -- Perjalanan jauh dipecah per langkah (LEG stud). Kalau server menjawab "blocked", langkah unit itu
 -- diperpendek (setengahnya, min LEG_MIN). Alasan dari server ditampilkan di baris status.
 -- Private server: zona tidak memberi hadiah (atribut workspace.CaptureRewardsOff), ditampilkan di panel.
+-- Jalankan ulang = versi lama berhenti sendiri (tidak perlu rejoin): stop() lama dipanggil, panel lama
+-- dihapus, dan tiap loop/handler mengecek token RUN; token berganti = berhenti.
 if game.GameId ~= 10757247806 then return end
-if _G.BC_CAPTURE then pcall(_G.BC_CAPTURE.stop) end
+local G = (getgenv and getgenv()) or _G
+for _, env in ipairs({ G, _G }) do
+  if env.BC_CAPTURE then pcall(env.BC_CAPTURE.stop) env.BC_CAPTURE = nil end
+end
+local RUN = {}
+G.BC_CAPTURE_RUN = RUN
 if not game:IsLoaded() then game.Loaded:Wait() end
+local GUI_PARENT = (gethui and gethui()) or game:GetService("CoreGui")
+for _, old in ipairs(GUI_PARENT:GetChildren()) do
+  if old.Name == "BCCapturePanel" then old:Destroy() end
+end
 
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
@@ -128,8 +139,10 @@ local function nextStep(a, pos)
 end
 
 -- ===== jawaban server: kalau blocked, perpendek langkah =====
+local function current() return alive and G.BC_CAPTURE_RUN == RUN end
+
 local function onOrderStatus(p)
-  if type(p) ~= "table" or p.state == "Planning" then return end
+  if not current() or type(p) ~= "table" or p.state == "Planning" then return end
   local reasons = {}
   if p.reason then reasons[#reasons + 1] = tostring(p.reason) end
   for _, r in ipairs(p.results or {}) do
@@ -207,7 +220,7 @@ end
 -- ===== panel =====
 local gui = Instance.new("ScreenGui")
 gui.Name, gui.ResetOnSpawn, gui.DisplayOrder = "BCCapturePanel", false, 50
-gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+gui.Parent = GUI_PARENT
 local W, ROW = 300, 22
 local panel = Instance.new("Frame")
 panel.Position, panel.BackgroundColor3, panel.BorderSizePixel = UDim2.fromOffset(300, 160), Color3.fromRGB(16, 15, 22), 0
@@ -323,8 +336,14 @@ table.insert(conns, UIS.InputBegan:Connect(function(i, processed)
   if not processed and i.KeyCode == Enum.KeyCode.Delete then gui.Enabled = not gui.Enabled end
 end))
 
+local function stop()
+  alive = false
+  for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+  pcall(function() gui:Destroy() end)
+end
+
 task.spawn(function()
-  while alive do
+  while current() and gui.Parent do
     if enabled then
       local ok, err = pcall(evaluate)
       if not ok then statusText = "ERR: " .. tostring(err) end
@@ -333,12 +352,7 @@ task.spawn(function()
     if not ok then statusRow.Text = "Panel ERR: " .. tostring(err) end
     task.wait(TICK)
   end
+  stop()                     -- diganti versi baru atau panel dihapus
 end)
 
-_G.BC_CAPTURE = {
-  stop = function()
-    alive = false
-    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-    pcall(function() gui:Destroy() end)
-  end,
-}
+G.BC_CAPTURE = { stop = stop }
