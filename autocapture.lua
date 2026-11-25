@@ -34,6 +34,8 @@ local LEG = 400                -- stud per langkah perjalanan
 local LEG_MIN = 40             -- langkah terpendek setelah berkali-kali blocked
 local STILL_STUD = 3           -- gerak kurang dari ini dalam 1 tick = diam
 local REORDER_MIN = 6          -- dtk minimal antar perintah ke unit yang sama
+local STUCK_ORDERS = 2         -- perintah berturut-turut tanpa kemajuan = macet, ganti titik tujuan
+local STUCK_GAIN = 10          -- stud; kemajuan lebih kecil dari ini dianggap tidak maju
 local SPREAD = 0.3             -- unit disebar di lingkaran = SPREAD x setengah ukuran zona terkecil
 local PRIORITY = { "URANIUM MINE", "CITY", "INDUSTRIAL ZONE", "NUCLEAR POWER PLANT", "OIL FIELD",
   "MINING SITE", "AIRPORT" }
@@ -56,6 +58,7 @@ local LOG_FILE = "bc_capture_log.txt"
 local logLines = {}
 local tickN, lastTickAt = 0, os.clock()
 local phase = "-"              -- langkah yang sedang dikerjakan tick (untuk melacak macet)
+local unitDebug = ""           -- baris status per unit, disusun di evaluate (bukan di render)
 local function log(msg)
   local line = os.date("%H:%M:%S") .. " [" .. RUN_ID .. "] " .. msg   -- [id] = salinan script yang menulis
   logLines[#logLines + 1] = line
@@ -135,16 +138,23 @@ end
 -- titik di tanah: tembak ray ke bawah, abaikan zona dan unit
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
+-- titik di TANAH (hanya Terrain, bukan atap bangunan: titik di atap tidak bisa dicapai unit)
+local terrainRay = RaycastParams.new()
+terrainRay.FilterType = Enum.RaycastFilterType.Include
+terrainRay.FilterDescendantsInstances = { workspace.Terrain }
+terrainRay.IgnoreWater = false
 local function ground(p, z)
-  local skip = { z, lp.Character }
-  for _, n in ipairs({ "MilitaryTrucks", "Squads" }) do skip[#skip + 1] = workspace:FindFirstChild(n) end
-  rayParams.FilterDescendantsInstances = skip
-  local hit = workspace:Raycast(Vector3.new(p.X, p.Y + 500, p.Z), Vector3.new(0, -2000, 0), rayParams)
+  local hit = workspace:Raycast(Vector3.new(p.X, p.Y + 500, p.Z), Vector3.new(0, -2000, 0), terrainRay)
+  if hit then return hit.Position end
+  rayParams.FilterDescendantsInstances = { z, lp.Character, workspace:FindFirstChild("MilitaryTrucks"),
+    workspace:FindFirstChild("Squads") }
+  hit = workspace:Raycast(Vector3.new(p.X, p.Y + 500, p.Z), Vector3.new(0, -2000, 0), rayParams)
   return hit and hit.Position or p
 end
 
+-- slot 1 = tengah; slot berikutnya melingkar. Unit yang macet pindah ke slot lain (lihat STUCK_ORDERS).
 local function slotPoint(z, slot)
-  local r = math.min(z.Size.X, z.Size.Z) / 2 * SPREAD
+  local r = math.min(z.Size.X, z.Size.Z) / 2 * (slot > 6 and 0.6 or SPREAD)
   local a = (slot - 1) * 2.399      -- sudut emas: sebaran rata
   local off = slot == 1 and Vector3.zero or Vector3.new(math.cos(a) * r, 0, math.sin(a) * r)
   return z.Position + off
@@ -259,6 +269,16 @@ local function evaluate()
     else
       a.state = "diam"
       if now - a.orderedAt >= REORDER_MIN then
+        -- macet: jarak tidak berkurang setelah beberapa perintah -> coba titik lain di zona
+        if a.bestDist and a.dist >= a.bestDist - STUCK_GAIN then
+          a.stuck = (a.stuck or 0) + 1
+        else
+          a.stuck, a.bestDist = 0, a.dist
+        end
+        if a.stuck >= STUCK_ORDERS then
+          a.slot, a.stuck, a.bestDist, a.leg = a.slot + 1, 0, nil, LEG
+          log(("MACET %s di sisa %d stud, ganti titik tujuan (slot %d)"):format(unitName(u), a.dist, a.slot))
+        end
         orders[#orders + 1] = { unit = u, position = nextStep(a, e.pos) }
         a.orderedAt = now
         a.state = "diperintah"
@@ -282,6 +302,19 @@ local function evaluate()
     end
     if res == false then log("OrderUnits menolak (return false)") end
   end
+  phase = "susun teks debug"
+  local okDbg, errDbg = pcall(function()
+    local lines = {}
+    for u, a in pairs(assign) do
+      if #lines >= DEBUG_UNITS then break end
+      lines[#lines + 1] = tostring(unitName(u)):sub(1, 14) .. " > " .. tostring((zoneTitle(a.zone))):sub(1, 10)
+        .. " | " .. tostring(a.state) .. " | sisa " .. tostring(a.dist) .. " | step " .. tostring(a.leg)
+        .. " | " .. tostring(a.result or "-")
+    end
+    unitDebug = table.concat(lines, "\n")
+  end)
+  if not okDbg then unitDebug = "debug ERR: " .. tostring(errDbg) log(unitDebug) end
+  phase = "status"
   local n, legs = 0, {}
   for _, a in pairs(assign) do n = n + 1 legs[#legs + 1] = a.leg end
   table.sort(legs)
@@ -332,7 +365,7 @@ local title = row("BC Auto Capture  [Delete]  (seret)")
 title.TextColor3 = Color3.new(1, 1, 1)
 local onRow = row("", function()
   enabled = not enabled
-  assign = {}
+  assign, unitDebug = {}, ""
   lastTickAt = os.clock()
   log("Auto Capture " .. (enabled and "ON" or "OFF"))
   render()
@@ -381,12 +414,14 @@ dbgRow.TextWrapped, dbgRow.TextYAlignment = true, Enum.TextYAlignment.Top
 dbgRow.Size = UDim2.fromOffset(W, ROW * 14)
 
 render = function()
+  phase = "render: tombol"
   onRow.Text = ">> Auto Capture: " .. (enabled and "ON" or "OFF")
   onRow.TextColor3 = enabled and Color3.fromRGB(120, 255, 120) or Color3.fromRGB(255, 220, 80)
   garRow.Text = "Jaga zona yang sudah direbut: " .. (garrison and "ON" or "OFF")
   rewardRow.Visible = workspace:GetAttribute("CaptureRewardsOff") == true
   local per = {}
   for _, a in pairs(assign) do per[a.zone] = (per[a.zone] or 0) + 1 end
+  phase = "render: daftar zona"
   local list = zones()
   for i, r in ipairs(zoneRows) do
     local z = list[i]
@@ -400,24 +435,19 @@ render = function()
         or (zoneMine(z) and Color3.fromRGB(130, 200, 255) or Color3.fromRGB(215, 212, 228))
     end
   end
+  phase = "render: status"
   statusRow.Text = enabled and statusText
     or ("OFF. %d zona darat ditemukan%s"):format(#list, #list == 0 and " (arahkan kamera ke tengah map)" or "")
   dbgToggle.Text = "Debug: " .. (debugOn and "ON" or "OFF") .. "  (log: " .. LOG_FILE .. ")"
   dbgRow.Visible = debugOn
   if debugOn then
-    local lines = {}
-    local shown = 0
-    for u, a in pairs(assign) do
-      shown = shown + 1
-      if shown > DEBUG_UNITS then break end
-      lines[#lines + 1] = ("%s > %s | %s | sisa %s | step %d | %s"):format(unitName(u):sub(1, 14),
-        (zoneTitle(a.zone)):sub(1, 10), a.state or "-", tostring(a.dist or "?"), a.leg, a.result or "-")
-    end
-    if shown == 0 then lines[1] = enabled and "(belum ada unit ditugaskan)" or "(Auto Capture OFF)" end
-    lines[#lines + 1] = "-- log --"
+    phase = "render: teks debug"
+    local lines = { unitDebug ~= "" and unitDebug or (enabled and "(belum ada unit ditugaskan)" or "(Auto Capture OFF)"),
+      "-- log --" }
     for _, l in ipairs(logLines) do lines[#lines + 1] = l end
     dbgRow.Text = table.concat(lines, "\n")
   end
+  phase = "render: ukuran panel"
   local h = 0
   for _, c in ipairs(panel:GetChildren()) do
     if c:IsA("GuiObject") and c.Visible then h = h + c.Size.Y.Offset end
