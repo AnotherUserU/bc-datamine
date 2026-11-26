@@ -64,6 +64,7 @@ local function log(tag, msg)
   end)
 end
 log("HUB", "=== BC Hub mulai ===")
+local sendLog                  -- kirim log ke webhook Discord (didefinisikan di bagian WEBHOOK)
 
 -- =====================================================================================================
 -- ESP
@@ -755,6 +756,7 @@ local function onFound(pool, i)
   log("SHUF", ("DITEMUKAN Augustus slot %d setelah %d shuffle (%d PP). Pool: %s"):format(i, shuf.count, shuf.spent, poolText(pool)))
   pcall(StarterGui.SetCore, StarterGui, "SendNotification",
     { Title = "Auto Shuffle", Text = "Augustus Vale muncul! Buka City Hall dan appoint.", Duration = 30 })
+  if sendLog then sendLog("AUGUSTUS VALE DITEMUKAN! Buka City Hall dan appoint.") end
 end
 
 local function shuffleOnce()
@@ -815,7 +817,66 @@ pcall(function()
 end)
 
 -- =====================================================================================================
--- PANEL (satu jendela, 4 tab). Hanya membaca variabel; tidak memanggil fungsi game.
+-- WEBHOOK: kirim bc_hub_log.txt (+ ringkasan) ke webhook Discord milikmu. URL disimpan lokal di workspace.
+-- =====================================================================================================
+local WEBHOOK_FILE = "bc_hub_webhook.txt"
+local LOG_SEND_MAX = 1000000   -- byte; hanya bagian akhir log yang dikirim kalau lebih besar
+local httpRequest = (syn and syn.request) or http_request or request or (http and http.request)
+local hook = { url = "", every = 0, lastSent = os.clock(), status = "Belum diatur", busy = false }
+pcall(function()
+  if isfile and isfile(WEBHOOK_FILE) then hook.url = readfile(WEBHOOK_FILE):gsub("%s", "") end
+end)
+local function validWebhook(url)
+  return url:match("^https://discord%.com/api/webhooks/%d+/[%w_%-]+$") ~= nil
+    or url:match("^https://discordapp%.com/api/webhooks/%d+/[%w_%-]+$") ~= nil
+    or url:match("^https://%a+%.discord%.com/api/webhooks/%d+/[%w_%-]+$") ~= nil
+end
+if hook.url ~= "" then hook.status = validWebhook(hook.url) and "Siap" or "URL tersimpan tidak valid" end
+
+local function summary(note)
+  return ("**BC Hub** (%s) %s\nShuffle: %d | PP terpakai: %d | PP: %d | Gagal: %d\nCapture: %s | Anti-AFK dicegah %dx")
+    :format(lp.Name, note or "", shuf.count, shuf.spent, shuf.pp, shuf.fails, cap.on and "ON" or "OFF", afk.count)
+end
+
+local function postLog(note)
+  if not httpRequest then error("executor tidak punya fungsi request") end
+  if not validWebhook(hook.url) then error("URL webhook belum diisi / tidak valid") end
+  local content = ""
+  pcall(function() if isfile(LOG_FILE) then content = readfile(LOG_FILE) end end)
+  if #content > LOG_SEND_MAX then content = "...(dipotong)\n" .. content:sub(-LOG_SEND_MAX) end
+  if content == "" then content = "(log kosong)" end
+  local boundary = "----BCHub" .. RUN_ID .. math.random(100000, 999999)
+  local payload = HttpService:JSONEncode({ content = summary(note):sub(1, 1900) })
+  local body = table.concat({
+    "--" .. boundary,
+    'Content-Disposition: form-data; name="payload_json"',
+    "Content-Type: application/json", "", payload,
+    "--" .. boundary,
+    'Content-Disposition: form-data; name="files[0]"; filename="bc_hub_log.txt"',
+    "Content-Type: text/plain", "", content,
+    "--" .. boundary .. "--", "",
+  }, "\r\n")
+  local res = httpRequest({ Url = hook.url, Method = "POST", Body = body,
+    Headers = { ["Content-Type"] = "multipart/form-data; boundary=" .. boundary } })
+  local code = res and (res.StatusCode or res.Status) or 0
+  if tonumber(code) == nil or tonumber(code) >= 300 then
+    error(("Discord menolak (%s): %s"):format(tostring(code), tostring(res and res.Body or "")):sub(1, 200))
+  end
+end
+
+sendLog = function(note)
+  if hook.busy then return end
+  hook.busy, hook.status = true, "Mengirim..."
+  task.spawn(function()
+    local ok, err = pcall(postLog, note)
+    hook.status = ok and ("Terkirim " .. os.date("%H:%M:%S")) or ("Gagal: " .. tostring(err))
+    if not ok then log("HUB", "webhook " .. hook.status) end
+    hook.lastSent, hook.busy = os.clock(), false
+  end)
+end
+
+-- =====================================================================================================
+-- PANEL (satu jendela, 5 tab). Hanya membaca variabel; tidak memanggil fungsi game.
 -- =====================================================================================================
 local C = {
   bg = Color3.fromRGB(22, 24, 30), card = Color3.fromRGB(36, 39, 48), text = Color3.fromRGB(225, 228, 235),
@@ -852,12 +913,12 @@ local function clickable(b, onClick)
   end)
 end
 
-local TABS = { "ESP", "RUDAL", "CAPTURE", "SHUFFLE" }
+local TABS = { "ESP", "RUDAL", "CAPTURE", "SHUFFLE", "LOG" }
 local pages, tabBtns, activeTab = {}, {}, "ESP"
 local tabW = (W - 20) / #TABS
 for i, name in ipairs(TABS) do
   local tb = new("TextButton", { Position = UDim2.fromOffset(10 + (i - 1) * tabW, 30), Size = UDim2.fromOffset(tabW - 4, 26),
-    BackgroundColor3 = C.card, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamBold, TextSize = 12,
+    BackgroundColor3 = C.card, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamBold, TextSize = 11,
     TextColor3 = C.text, Text = name }, frame)
   corner(tb)
   clickable(tb, function() activeTab = name end)
@@ -1012,6 +1073,31 @@ do
   end).Text = "Reset statistik & riwayat"
 end
 
+-- ----- tab LOG -----
+do
+  local pg = pages.LOG
+  textLine(pg, C.muted).Text = "Semua fitur menulis ke satu file: " .. LOG_FILE .. " (workspace Delta). Log bisa dikirim "
+    .. "sebagai file .txt ke webhook Discord milikmu. Webhook = rahasia, jangan dibagikan."
+  local urlBox = input(pg, "URL webhook", "https://discord.com/api/webhooks/...", function(box)
+    local url = box.Text:gsub("%s", "")
+    if url == "" then return end
+    if not validWebhook(url) then hook.status = "URL tidak valid (harus discord.com/api/webhooks/...)" return end
+    hook.url, hook.status = url, "Tersimpan"
+    pcall(writefile, WEBHOOK_FILE, url)
+    box.Text = ""
+  end)
+  urlBox.TextTruncate = Enum.TextTruncate.AtEnd
+  input(pg, "Kirim otomatis tiap (menit, 0 = mati)", "0", function(box)
+    local n = numberOf(box)
+    hook.every = (n and n > 0) and n * 60 or 0
+    box.Text = hook.every > 0 and tostring(hook.every / 60) or ""
+  end)
+  ui.hookSend = button(pg, function() sendLog("(kirim manual)") end)
+  ui.hookStatus = textLine(pg)
+  textLine(pg, C.muted).Text = "Augustus ditemukan = log otomatis terkirim (kalau webhook sudah diisi)."
+  ui.hookTail = textLine(pg, Color3.fromRGB(190, 230, 190), Enum.Font.Code)
+end
+
 -- ----- render -----
 local function renderESP()
   local cnt, per = {}, {}
@@ -1109,7 +1195,20 @@ local function renderShuffle()
   ui.shufHist.Text = #shuf.history > 0 and table.concat(shuf.history, "\n") or "(belum ada)"
 end
 
-local RENDER = { ESP = renderESP, RUDAL = renderRudal, CAPTURE = renderCapture, SHUFFLE = renderShuffle }
+local function renderLog()
+  ui.hookSend.Text = hook.busy and ">> Mengirim..." or ">> Kirim log sekarang"
+  ui.hookSend.BackgroundColor3 = hook.busy and C.off or C.on
+  ui.hookStatus.Text = ("Webhook: %s | otomatis: %s\nStatus: %s"):format(
+    validWebhook(hook.url) and ("..." .. hook.url:sub(-6)) or "belum diisi",
+    hook.every > 0 and ("tiap %d menit"):format(hook.every / 60) or "mati", hook.status)
+  local lines = {}
+  for _, tag in ipairs({ "HUB", "SHUF", "CAP", "MIS" }) do
+    for _, l in ipairs(recent[tag]) do lines[#lines + 1] = tag .. " " .. l end
+  end
+  ui.hookTail.Text = #lines > 0 and table.concat(lines, "\n") or "(log kosong)"
+end
+
+local RENDER = { ESP = renderESP, RUDAL = renderRudal, CAPTURE = renderCapture, SHUFFLE = renderShuffle, LOG = renderLog }
 local function render()
   for name, tb in pairs(tabBtns) do
     local on = name == activeTab
@@ -1216,6 +1315,16 @@ task.spawn(function()
       delay = 3
     end
     task.wait(delay)
+  end
+end)
+
+-- ===== kirim log otomatis ke webhook =====
+task.spawn(function()
+  while running() do
+    if hook.every > 0 and validWebhook(hook.url) and os.clock() - hook.lastSent >= hook.every then
+      sendLog("(otomatis)")
+    end
+    task.wait(10)
   end
 end)
 
