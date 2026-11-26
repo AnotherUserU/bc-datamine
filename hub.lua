@@ -831,7 +831,22 @@ local function validWebhook(url)
     or url:match("^https://discordapp%.com/api/webhooks/%d+/[%w_%-]+$") ~= nil
     or url:match("^https://%a+%.discord%.com/api/webhooks/%d+/[%w_%-]+$") ~= nil
 end
-if hook.url ~= "" then hook.status = validWebhook(hook.url) and "Siap" or "URL tersimpan tidak valid" end
+-- Kunci: hub hanya jalan dengan URL webhook pemilik. Yang disimpan di script hanya hash-nya (FNV-1a 32 bit, dua arah),
+-- jadi repo publik tidak membocorkan URL. Ini kunci ringan: source tetap bisa dibaca/diubah orang.
+local KEY_HASH = "fbf0ad5c9bbc9cb0"
+local function mul32(a, b)
+  return (a * (b % 65536) + ((a * math.floor(b / 65536)) % 65536) * 65536) % 4294967296
+end
+local function fnv(s)
+  local h = 2166136261
+  for i = 1, #s do h = mul32(bit32.bxor(h, s:byte(i)), 16777619) end
+  return h
+end
+local function isKey(url)
+  return validWebhook(url) and ("%08x%08x"):format(fnv(url), fnv(url:reverse())) == KEY_HASH
+end
+local unlocked = isKey(hook.url)
+if hook.url ~= "" then hook.status = unlocked and "Siap" or "URL tersimpan bukan kunci yang benar" end
 
 local function summary(note)
   return ("**BC Hub** (%s) %s\nShuffle: %d | PP terpakai: %d | PP: %d | Gagal: %d\nCapture: %s | Anti-AFK dicegah %dx")
@@ -1081,7 +1096,7 @@ do
   local urlBox = input(pg, "URL webhook", "https://discord.com/api/webhooks/...", function(box)
     local url = box.Text:gsub("%s", "")
     if url == "" then return end
-    if not validWebhook(url) then hook.status = "URL tidak valid (harus discord.com/api/webhooks/...)" return end
+    if not isKey(url) then hook.status = "Bukan URL webhook kunci yang benar" return end
     hook.url, hook.status = url, "Tersimpan"
     pcall(writefile, WEBHOOK_FILE, url)
     box.Text = ""
@@ -1241,7 +1256,7 @@ do
 end
 
 connect(UIS.InputBegan, function(i, processed)
-  if processed or not current() then return end
+  if processed or not current() or not unlocked then return end
   local k = i.KeyCode
   if k == Enum.KeyCode.Insert or k == Enum.KeyCode.Delete then
     gui.Enabled = not gui.Enabled
@@ -1261,8 +1276,8 @@ local function showWebhookPrompt()
   new("TextLabel", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 8), Size = UDim2.new(1, -24, 0, 54),
     Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = C.text, TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
-    Text = "BC Hub: tempel URL webhook Discord untuk menerima log (.txt). Disimpan lokal di Delta, "
-      .. "tidak masuk repo. Bisa diganti nanti di tab LOG." }, box)
+    Text = "BC Hub terkunci. Tempel URL webhook (kunci) dari pemilik script. Log kamu (.txt) akan dikirim ke "
+      .. "channel Discord pemilik kunci. Disimpan lokal di Delta, cukup sekali." }, box)
   local field = new("TextBox", { Position = UDim2.fromOffset(12, 66), Size = UDim2.new(1, -24, 0, 30),
     BackgroundColor3 = C.card, BorderSizePixel = 0, Font = Enum.Font.Code, TextSize = 12, TextColor3 = C.text,
     PlaceholderText = "https://discord.com/api/webhooks/...", PlaceholderColor3 = C.muted, ClearTextOnFocus = false,
@@ -1270,32 +1285,22 @@ local function showWebhookPrompt()
   corner(field)
   local msg = new("TextLabel", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 100), Size = UDim2.new(1, -24, 0, 18),
     Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = C.red, TextXAlignment = Enum.TextXAlignment.Left, Text = "" }, box)
-  local function done()
-    box:Destroy()
-    frame.Visible = true
-  end
-  local save = new("TextButton", { Position = UDim2.fromOffset(12, 126), Size = UDim2.new(0.5, -16, 0, 32),
+  local save = new("TextButton", { Position = UDim2.fromOffset(12, 126), Size = UDim2.new(1, -24, 0, 32),
     BackgroundColor3 = C.on, BorderSizePixel = 0, Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = C.text,
-    Text = "Simpan & mulai" }, box)
+    Text = "Buka kunci & mulai" }, box)
   corner(save)
-  local skip = new("TextButton", { Position = UDim2.new(0.5, 4, 0, 126), Size = UDim2.new(0.5, -16, 0, 32),
-    BackgroundColor3 = C.off, BorderSizePixel = 0, Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = C.text,
-    Text = "Lewati" }, box)
-  corner(skip)
   clickable(save, function()
     local url = field.Text:gsub("%s", "")
-    if not validWebhook(url) then msg.Text = "URL tidak valid (harus https://discord.com/api/webhooks/...)" return end
+    if not isKey(url) then msg.Text = "Kunci salah. Minta URL webhook yang benar ke pemilik script." return end
     hook.url, hook.status = url, "Tersimpan"
     pcall(writefile, WEBHOOK_FILE, url)
-    log("HUB", "webhook disimpan")
-    done()
-  end)
-  clickable(skip, function()
-    hook.status = "Dilewati (isi di tab LOG kalau perlu)"
-    done()
+    log("HUB", "kunci benar, hub dibuka")
+    unlocked = true
+    box:Destroy()
+    frame.Visible = true
   end)
 end
-if not validWebhook(hook.url) then showWebhookPrompt() end
+if not unlocked then showWebhookPrompt() end
 
 gui.Parent = GUI_PARENT
 
@@ -1309,9 +1314,11 @@ end
 G.BC_HUB = { stop = stop }
 
 local function running() return current() and gui.Parent ~= nil end
+local function waitUnlock() while running() and not unlocked do task.wait(0.5) end end
 
 -- ===== loop kerja ESP (label 3D) =====
 task.spawn(function()
+  waitUnlock()
   local lastScan, lastStream = 0, os.clock()
   while running() do
     local now = os.clock()
@@ -1332,6 +1339,7 @@ end)
 
 -- ===== loop kerja capture (watchdog: tick yang macet > TICK_TIMEOUT dilewati) =====
 task.spawn(function()
+  waitUnlock()
   while running() do
     pcall(function() for _, z in ipairs(CS:GetTagged("CaptureZone")) do cacheTitle(z) end end)
     if cap.on then
@@ -1351,6 +1359,7 @@ end)
 
 -- ===== loop kerja shuffle =====
 task.spawn(function()
+  waitUnlock()
   while running() do
     local ok, res = pcall(shuffleStep)
     local delay = 1
@@ -1365,6 +1374,7 @@ end)
 
 -- ===== kirim log otomatis ke webhook =====
 task.spawn(function()
+  waitUnlock()
   while running() do
     if hook.every > 0 and validWebhook(hook.url) and os.clock() - hook.lastSent >= hook.every then
       sendLog("(otomatis)")
@@ -1386,4 +1396,4 @@ task.spawn(function()
   end
 end)
 
-fullRescan()
+task.spawn(function() waitUnlock() if running() then fullRescan() end end)
