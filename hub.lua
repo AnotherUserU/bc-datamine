@@ -1252,6 +1252,51 @@ connect(UIS.InputBegan, function(i, processed)
   end
 end)
 
+-- Layar awal: minta URL webhook sebelum panel utama muncul (dilewati kalau sudah tersimpan & valid).
+local function showWebhookPrompt()
+  frame.Visible = false
+  local box = new("Frame", { Size = UDim2.fromOffset(360, 170), Position = UDim2.new(0.5, -180, 0.5, -85),
+    BackgroundColor3 = C.bg, BorderSizePixel = 0 }, gui)
+  corner(box, 8)
+  new("TextLabel", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 8), Size = UDim2.new(1, -24, 0, 54),
+    Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = C.text, TextWrapped = true,
+    TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+    Text = "BC Hub: tempel URL webhook Discord untuk menerima log (.txt). Disimpan lokal di Delta, "
+      .. "tidak masuk repo. Bisa diganti nanti di tab LOG." }, box)
+  local field = new("TextBox", { Position = UDim2.fromOffset(12, 66), Size = UDim2.new(1, -24, 0, 30),
+    BackgroundColor3 = C.card, BorderSizePixel = 0, Font = Enum.Font.Code, TextSize = 12, TextColor3 = C.text,
+    PlaceholderText = "https://discord.com/api/webhooks/...", PlaceholderColor3 = C.muted, ClearTextOnFocus = false,
+    TextTruncate = Enum.TextTruncate.AtEnd, Text = "" }, box)
+  corner(field)
+  local msg = new("TextLabel", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 100), Size = UDim2.new(1, -24, 0, 18),
+    Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = C.red, TextXAlignment = Enum.TextXAlignment.Left, Text = "" }, box)
+  local function done()
+    box:Destroy()
+    frame.Visible = true
+  end
+  local save = new("TextButton", { Position = UDim2.fromOffset(12, 126), Size = UDim2.new(0.5, -16, 0, 32),
+    BackgroundColor3 = C.on, BorderSizePixel = 0, Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = C.text,
+    Text = "Simpan & mulai" }, box)
+  corner(save)
+  local skip = new("TextButton", { Position = UDim2.new(0.5, 4, 0, 126), Size = UDim2.new(0.5, -16, 0, 32),
+    BackgroundColor3 = C.off, BorderSizePixel = 0, Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = C.text,
+    Text = "Lewati" }, box)
+  corner(skip)
+  clickable(save, function()
+    local url = field.Text:gsub("%s", "")
+    if not validWebhook(url) then msg.Text = "URL tidak valid (harus https://discord.com/api/webhooks/...)" return end
+    hook.url, hook.status = url, "Tersimpan"
+    pcall(writefile, WEBHOOK_FILE, url)
+    log("HUB", "webhook disimpan")
+    done()
+  end)
+  clickable(skip, function()
+    hook.status = "Dilewati (isi di tab LOG kalau perlu)"
+    done()
+  end)
+end
+if not validWebhook(hook.url) then showWebhookPrompt() end
+
 gui.Parent = GUI_PARENT
 
 local function stop()
