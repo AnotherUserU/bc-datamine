@@ -823,8 +823,13 @@ local WEBHOOK_FILE = "bc_hub_webhook.txt"
 local LOG_SEND_MAX = 1000000   -- byte; hanya bagian akhir log yang dikirim kalau lebih besar
 local httpRequest = (syn and syn.request) or http_request or request or (http and http.request)
 local hook = { url = "", every = 0, lastSent = os.clock(), status = "Belum diatur", busy = false }
+local AUTOSEND_FILE = "bc_hub_autosend.txt"   -- menit kirim otomatis, disimpan supaya autoexec tidak reset
 pcall(function()
   if isfile and isfile(WEBHOOK_FILE) then hook.url = readfile(WEBHOOK_FILE):gsub("%s", "") end
+  if isfile and isfile(AUTOSEND_FILE) then
+    local n = tonumber((readfile(AUTOSEND_FILE):gsub("%s", "")))
+    hook.every = (n and n > 0) and math.floor(n) * 60 or 0
+  end
 end)
 local function validWebhook(url)
   return url:match("^https://discord%.com/api/webhooks/%d+/[%w_%-]+$") ~= nil
@@ -975,10 +980,11 @@ local function button(pg, onClick, swatch)
   return b, sw
 end
 local function input(pg, caption, placeholder, onCommit)
-  local row = new("Frame", { Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = nextOrder() }, pg)
-  new("TextLabel", { BackgroundTransparency = 1, Size = UDim2.new(0.55, 0, 1, 0), Font = Enum.Font.GothamMedium,
-    TextSize = 12, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left, Text = caption }, row)
-  local box = new("TextBox", { Position = UDim2.new(0.55, 0, 0, 0), Size = UDim2.new(0.45, 0, 1, 0),
+  local row = new("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, LayoutOrder = nextOrder() }, pg)
+  new("TextLabel", { BackgroundTransparency = 1, Size = UDim2.new(0.5, -6, 1, 0), Font = Enum.Font.GothamMedium,
+    TextSize = 12, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true,
+    Text = caption }, row)
+  local box = new("TextBox", { Position = UDim2.new(0.5, 0, 0, 2), Size = UDim2.new(0.5, 0, 1, -4),
     BackgroundColor3 = C.card, BorderSizePixel = 0, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.text,
     PlaceholderText = placeholder, PlaceholderColor3 = C.muted, ClearTextOnFocus = false, Text = "" }, row)
   corner(box)
@@ -1022,7 +1028,7 @@ do
     local nxt = list[idx + 1]
     mis.baseKey = nxt and nxt.key or nil
   end)
-  input(pg, "Limit MARK (kosong = Auto)", "Auto", function(box)
+  input(pg, "Limit MARK", "Auto (kosong)", function(box)
     local n = numberOf(box)
     mis.limit = (n and n > 0) and math.floor(n) or 0
     box.Text = mis.limit > 0 and tostring(mis.limit) or ""
@@ -1102,11 +1108,13 @@ do
     box.Text = ""
   end)
   urlBox.TextTruncate = Enum.TextTruncate.AtEnd
-  input(pg, "Kirim otomatis tiap (menit, 0 = mati)", "0", function(box)
+  local everyBox = input(pg, "Auto kirim (menit)", "0 = mati", function(box)
     local n = numberOf(box)
     hook.every = (n and n > 0) and n * 60 or 0
     box.Text = hook.every > 0 and tostring(hook.every / 60) or ""
+    pcall(writefile, AUTOSEND_FILE, tostring(hook.every / 60))
   end)
+  everyBox.Text = hook.every > 0 and tostring(hook.every / 60) or ""
   ui.hookSend = button(pg, function() sendLog("(kirim manual)") end)
   ui.hookStatus = textLine(pg)
   textLine(pg, C.muted).Text = "Augustus ditemukan = log otomatis terkirim (kalau webhook sudah diisi)."
