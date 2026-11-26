@@ -57,7 +57,17 @@ local CATEGORY_FILE = { HUB = "hub", ESP = "esp", MIS = "rudal", CAP = "capture"
 pcall(makefolder, HUB_DIR)
 local recent = { ESP = {}, MIS = {}, CAP = {}, SHUF = {}, HUB = {} }
 local logStarted = {}
+-- Sensor data rahasia sebelum ditulis ke file / dikirim: URL webhook dan cookie Roblox (.ROBLOSECURITY).
+-- Dipakai di setiap jalur tulis log dan di setiap data yang dikirim ke Discord.
+local function redact(s)
+  s = tostring(s)
+  s = s:gsub("https?://[%w%.]*discord[%w]*%.com/api/webhooks/[%w_%-/]+", "[webhook disensor]")
+  s = s:gsub("_|WARNING:%-DO%-NOT%-SHARE%-THIS[^%s\"']*", "[cookie disensor]")
+  s = s:gsub("%.ROBLOSECURITY=[^%s;\"']+", ".ROBLOSECURITY=[cookie disensor]")
+  return s
+end
 local function log(tag, msg)
+  msg = redact(msg)
   local stamp = os.date("%H:%M:%S")
   local list = recent[tag]
   list[#list + 1] = stamp .. " " .. msg
@@ -857,7 +867,7 @@ local function cfmt(v, depth)
   return tostring(v)
 end
 local function cline(text)
-  if combat.on then combat.lines[#combat.lines + 1] = ("%.3f %s"):format(workspace:GetServerTimeNow(), text) end
+  if combat.on then combat.lines[#combat.lines + 1] = ("%.3f %s"):format(workspace:GetServerTimeNow(), redact(text)) end
 end
 
 local function combatWatchBuilding(m)
@@ -968,37 +978,46 @@ local SENT_FILE = "bc_hub_sent.json"
 local SEND_DIRS = { HUB_DIR, COMBAT_DIR }
 local MSG_MAX_BYTES = 8000000   -- batas lampiran webhook Discord ~10 MB per pesan
 local MSG_MAX_FILES = 9         -- batas Discord 10 lampiran per pesan
-local sentBytes = {}
+local sentBytes = {}            -- [file] = byte terkirim; sentBytes._done[file] = true -> file sesi lama, selesai
 pcall(function()
   if isfile(SENT_FILE) then
     local t = HttpService:JSONDecode(readfile(SENT_FILE))
     if type(t) == "table" then sentBytes = t end
   end
 end)
+if type(sentBytes._done) ~= "table" then sentBytes._done = {} end
 local function saveSent() pcall(writefile, SENT_FILE, HttpService:JSONEncode(sentBytes)) end
+-- file dari sesi lain tidak akan bertambah lagi: setelah terkirim penuh, tidak perlu dibaca ulang
+local function isOldSession(key) return not key:find(SESSION, 1, true) end
 
--- potongan yang belum terkirim: { key, from, to, data }, file terlama dulu
+-- potongan yang belum terkirim: { key, from, to, size, data }, file terlama dulu
 local function pendingChunks()
   combatFlush()
-  local out = {}
+  local out, changed = {}, false
   for _, dir in ipairs(SEND_DIRS) do
     local ok, files = pcall(listfiles, dir)
     if ok and type(files) == "table" then
       table.sort(files)
       for _, path in ipairs(files) do
         local key = tostring(path):gsub("\\", "/")
-        local okR, data = pcall(readfile, path)
-        if key:sub(-4) == ".txt" and okR and type(data) == "string" then
-          local from = math.min(tonumber(sentBytes[key]) or 0, #data)
-          while from < #data do
-            local to = math.min(#data, from + MSG_MAX_BYTES)
-            out[#out + 1] = { key = key, from = from, to = to, data = data:sub(from + 1, to) }
-            from = to
+        if key:sub(-4) == ".txt" and not sentBytes._done[key] then
+          local okR, data = pcall(readfile, path)
+          if okR and type(data) == "string" then
+            local from = math.min(tonumber(sentBytes[key]) or 0, #data)
+            if from >= #data and isOldSession(key) then
+              sentBytes._done[key], changed = true, true
+            end
+            while from < #data do
+              local to = math.min(#data, from + MSG_MAX_BYTES)
+              out[#out + 1] = { key = key, from = from, to = to, size = #data, data = data:sub(from + 1, to) }
+              from = to
+            end
           end
         end
       end
     end
   end
+  if changed then saveSent() end
   return out
 end
 
@@ -1011,12 +1030,13 @@ end
 
 local function post(content, files)
   local boundary = "----BCHub" .. RUN_ID .. math.random(100000, 999999)
+  -- jaring pengaman: semua teks yang keluar disensor lagi (juga file lama yang ditulis sebelum ada sensor)
   local parts = { "--" .. boundary, 'Content-Disposition: form-data; name="payload_json"',
-    "Content-Type: application/json", "", HttpService:JSONEncode({ content = content:sub(1, 1900) }) }
+    "Content-Type: application/json", "", HttpService:JSONEncode({ content = redact(content):sub(1, 1900) }) }
   for i, f in ipairs(files) do
     for _, p in ipairs({ "--" .. boundary,
       ('Content-Disposition: form-data; name="files[%d]"; filename="%s"'):format(i - 1, f.name),
-      "Content-Type: text/plain", "", f.data }) do parts[#parts + 1] = p end
+      "Content-Type: text/plain", "", redact(f.data) }) do parts[#parts + 1] = p end
   end
   parts[#parts + 1] = "--" .. boundary .. "--"
   parts[#parts + 1] = ""
@@ -1047,7 +1067,10 @@ local function postLog(note)
       names[#names + 1] = files[#files].name
     end
     post((msgN == 1 and summary(note) or "(lanjutan)") .. "\nFile: " .. table.concat(names, ", "), files)
-    for _, c in ipairs(batch) do sentBytes[c.key] = c.to end
+    for _, c in ipairs(batch) do
+      sentBytes[c.key] = c.to
+      if c.to >= c.size and isOldSession(c.key) then sentBytes._done[c.key] = true end
+    end
     saveSent()
     sentN = sentN + #batch
     batch, bytes = {}, 0
@@ -1069,7 +1092,7 @@ sendLog = function(note)
     local ok, res = pcall(postLog, note)
     local err = res
     hook.status = ok and (res > 0 and ("Terkirim %d file baru, %s"):format(res, os.date("%H:%M:%S"))
-      or ("Tidak ada log baru, " .. os.date("%H:%M:%S"))) or ("Gagal: " .. tostring(err))
+      or ("Tidak ada log baru, " .. os.date("%H:%M:%S"))) or ("Gagal: " .. redact(err))
     if not ok then log("HUB", "webhook " .. hook.status) end
     hook.lastSent, hook.busy = os.clock(), false
   end)
