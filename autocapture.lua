@@ -34,10 +34,14 @@ local TICK = 3                 -- dtk antar evaluasi
 local LEG = 400                -- stud per langkah perjalanan
 local LEG_MIN = 40             -- langkah terpendek setelah berkali-kali blocked
 local STILL_STUD = 3           -- gerak kurang dari ini dalam 1 tick = diam
-local REORDER_MIN = 6          -- dtk minimal antar perintah ke unit yang sama
+local REORDER_MIN = 3          -- dtk minimal antar perintah ke unit yang sama
+-- Jalan memutar: kalau blocked/macet, langkah berikutnya dibelokkan bergantian (derajat dari arah lurus ke
+-- zona). Setelah satu langkah belok berhasil, kembali lurus. Semua arah habis = coba sisi lain zona.
+local DETOURS = { 0, 45, -45, 90, -90 }
 local STUCK_ORDERS = 2         -- perintah berturut-turut tanpa kemajuan = macet, ganti titik tujuan
 local STUCK_GAIN = 10          -- stud; kemajuan lebih kecil dari ini dianggap tidak maju
-local MAX_FAILS = 3            -- macet/blocked sekian kali di satu zona -> unit diganti unit lain
+local MAX_FAILS = 6            -- macet/blocked sekian kali di satu zona -> unit diganti unit lain
+                               -- (cukup untuk mencoba semua arah DETOURS dulu)
 local BAN_SECONDS = 300        -- unit yang gagal tidak dikirim ke zona itu lagi selama ini
 -- Tujuan = titik di TEPI DALAM zona yang menghadap unit (bukan tengah: tengah sering lubang tambang /
 -- bangunan yang tidak bisa didatangi). Cukup masuk batas zona untuk merebutnya.
@@ -177,8 +181,24 @@ local function nextStep(a, pos)
   local goal = edgePoint(a)
   local flat = Vector3.new(goal.X - pos.X, 0, goal.Z - pos.Z)
   local d = flat.Magnitude
-  local target = d > a.leg and (pos + flat.Unit * a.leg) or goal
-  return ground(target, a.zone)
+  local turn = DETOURS[a.detour or 1]
+  if turn == 0 then
+    local target = d > a.leg and (pos + flat.Unit * a.leg) or goal
+    return ground(target, a.zone)
+  end
+  -- belok: arah lurus diputar 'turn' derajat di sumbu Y, panjang = langkah (tidak melewati jarak ke tujuan)
+  local dir = (CFrame.Angles(0, math.rad(turn), 0) * flat.Unit)
+  return ground(pos + dir * math.min(a.leg, d), a.zone)
+end
+
+-- gagal (blocked/macet): pindah ke arah belok berikutnya; semua arah habis = sisi lain zona
+local function nextDetour(a)
+  a.detour = (a.detour or 1) % #DETOURS + 1
+  if a.detour == 1 then
+    a.angle = a.angle + RETRY_TURN
+    return "semua arah dicoba, pindah ke sisi lain zona"
+  end
+  return ("belok %+d derajat"):format(DETOURS[a.detour])
 end
 
 -- ===== jawaban server: kalau blocked, perpendek langkah =====
@@ -206,13 +226,14 @@ local function onOrderStatus(p)
         a.result = st .. (why and (" (" .. tostring(why) .. ")") or "")
         if isFail(st) then
           a.fails = (a.fails or 0) + 1
-          a.angle = a.angle + RETRY_TURN   -- titik ini ditolak: coba sisi lain zona
+          local how = nextDetour(a)          -- arah ini ditolak: belok / sisi lain zona
           a.leg = math.max(LEG_MIN, math.floor(a.leg / 2))
           a.orderedAt = 0        -- coba lagi tick berikutnya dengan langkah lebih pendek
-          log(("SERVER %s: %s -> gagal %d/%d, coba sisi lain, langkah %d stud"):format(
-            unitName(r.unit), a.result, a.fails, MAX_FAILS, a.leg))
+          log(("SERVER %s: %s -> gagal %d/%d, %s, langkah %d stud"):format(
+            unitName(r.unit), a.result, a.fails, MAX_FAILS, how, a.leg))
         else
           a.leg = math.min(LEG, a.leg * 2)   -- berhasil: langkah dipanjangkan lagi
+          if (a.detour or 1) ~= 1 then a.detourDone = true end   -- langkah belok diterima: berikutnya lurus
           if st:lower():find("arriv", 1, true) then
             a.orderedAt = 0      -- sampai di ujung langkah: langkah berikutnya tanpa menunggu
             log(("SERVER %s: %s (ujung langkah), lanjut"):format(unitName(r.unit), st))
@@ -273,7 +294,7 @@ local function evaluate()
         if not best then break end   -- tidak ada unit bebas yang boleh ke zona ini
         local e = table.remove(pool, best)
         count[z] = (count[z] or 0) + 1
-        assign[e.unit] = { zone = z, orderedAt = 0, leg = LEG, state = "baru", result = "-", fails = 0,
+        assign[e.unit] = { zone = z, orderedAt = 0, leg = LEG, state = "baru", result = "-", fails = 0, detour = 1,
           angle = angleFrom(z, e.pos) + (count[z] - 1) * 0.5 }   -- sisi yang menghadap unit, disebar
         log(("TUGAS %s -> %s (%d stud)"):format(unitName(e.unit), (zoneTitle(z)), math.floor(bd)))
         need = need - 1
@@ -304,10 +325,12 @@ local function evaluate()
           a.stuck, a.bestDist = 0, a.dist
         end
         if a.stuck >= STUCK_ORDERS then
-          a.angle, a.stuck, a.bestDist, a.leg = a.angle + RETRY_TURN, 0, nil, LEG
+          a.stuck, a.bestDist, a.detourDone = 0, nil, false
           a.fails = (a.fails or 0) + 1
-          log(("MACET %s di sisa %d stud, gagal %d/%d, coba sisi lain zona"):format(
-            unitName(u), a.dist, a.fails, MAX_FAILS))
+          local how = nextDetour(a)
+          log(("MACET %s di sisa %d stud, gagal %d/%d, %s"):format(unitName(u), a.dist, a.fails, MAX_FAILS, how))
+        elseif a.detourDone then
+          a.detour, a.detourDone = 1, false  -- sudah memutar satu langkah: kembali lurus ke zona
         end
         orders[#orders + 1] = { unit = u, position = nextStep(a, e.pos) }
         a.orderedAt = now
@@ -320,7 +343,9 @@ local function evaluate()
   if #orders > 0 then
     for _, o in ipairs(orders) do
       local a = assign[o.unit]
-      log(("PERINTAH %s langkah %d stud, sisa %d stud ke %s"):format(unitName(o.unit), a.leg, a.dist, (zoneTitle(a.zone))))
+      local turn = DETOURS[a.detour or 1]
+      log(("PERINTAH %s langkah %d stud%s, sisa %d stud ke %s"):format(unitName(o.unit), a.leg,
+        turn ~= 0 and (" belok %+d"):format(turn) or "", a.dist, (zoneTitle(a.zone))))
     end
     -- Dikirim dari thread TERPISAH: thread yang memanggil fungsi game tidak bisa lagi menulis ke panel
     -- (di Delta tertahan selamanya = "MACET di fase render"). Thread ini tidak menyentuh GUI.
@@ -341,6 +366,7 @@ local function evaluate()
       if #lines >= DEBUG_UNITS then break end
       lines[#lines + 1] = tostring(unitName(u)):sub(1, 14) .. " > " .. tostring((zoneTitle(a.zone))):sub(1, 10)
         .. " | " .. tostring(a.state) .. " | sisa " .. tostring(a.dist) .. " | step " .. tostring(a.leg)
+        .. ((a.detour or 1) ~= 1 and (" belok " .. DETOURS[a.detour]) or "") .. " | gagal " .. tostring(a.fails or 0)
         .. " | " .. tostring(a.result or "-")
     end
     unitDebug = table.concat(lines, "\n")
