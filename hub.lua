@@ -1,0 +1,1235 @@
+-- Build and Conquer HUB: ESP + rudal (auto-mark) + auto-capture + auto-shuffle dalam SATU script & SATU panel.
+-- INTERNAL (Delta). Satu file karena executor menjalankan satu loadstring (pengecualian batas 800 baris).
+-- Aturan thread (pelajaran dari "MACET render" / panel stuck "Label"): thread yang menggambar panel TIDAK pernah
+-- memanggil fungsi game (remote, GameActions, modul game). Semua panggilan game ada di thread kerja; panel hanya
+-- membaca variabel biasa. Error render ditampilkan di panel (tidak disembunyikan).
+-- Jalankan ulang = versi lama (termasuk script ESP/capture/shuffle terpisah) berhenti sendiri.
+-- Tombol: Insert/Delete = sembunyikan panel, "=" = MARK rudal, "-" = muat + scan ulang ESP.
+if game.GameId ~= 10757247806 then return end
+local G = (getgenv and getgenv()) or _G
+for _, key in ipairs({ "BC_HUB", "BC_ESP_INT", "BC_CAPTURE", "BC_SHUFFLE" }) do
+  for _, env in ipairs({ G, _G }) do
+    if env[key] then pcall(env[key].stop) env[key] = nil end
+  end
+end
+local GUI_PARENT = (gethui and gethui()) or game:GetService("CoreGui")
+local RUN_ID = ("%04x"):format(math.random(0, 0xffff))
+GUI_PARENT:SetAttribute("BCHubRun", RUN_ID)
+for _, a in ipairs({ "BCEspRun", "BCCaptureRun", "BCShuffleRun" }) do GUI_PARENT:SetAttribute(a, "hub") end
+local OLD_GUIS = { BCHub = true, BCEspInt = true, BCEspIntPanel = true, BCCapturePanel = true, BCShufflePanel = true }
+for _, old in ipairs(GUI_PARENT:GetChildren()) do
+  if OLD_GUIS[old.Name] then old:Destroy() end
+end
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local CS = game:GetService("CollectionService")
+local UIS = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local StarterGui = game:GetService("StarterGui")
+local lp = Players.LocalPlayer
+
+local GameActions = require(RS:WaitForChild("GameActions"))
+local ZoneTypes = require(RS:WaitForChild("CaptureZoneTypes"))
+local Politics = require(RS:WaitForChild("Politics"))
+local ShipKinds
+pcall(function() ShipKinds = require(RS:WaitForChild("ShipKinds", 10)) end)
+
+local alive = true
+local conns = {}
+local function current() return alive and GUI_PARENT:GetAttribute("BCHubRun") == RUN_ID end
+local function connect(signal, fn) conns[#conns + 1] = signal:Connect(fn) end
+local function attr(i, k)
+  local ok, v = pcall(i.GetAttribute, i, k)
+  return ok and v or nil
+end
+local function playerName(id)
+  local p = id and Players:GetPlayerByUserId(id)
+  return p and p.Name or tostring(id)
+end
+
+-- ===== log: file bc_hub_log.txt + 6 baris terakhir per modul untuk panel =====
+local LOG_FILE = "bc_hub_log.txt"
+local recent = { ESP = {}, MIS = {}, CAP = {}, SHUF = {}, HUB = {} }
+local function log(tag, msg)
+  local stamp = os.date("%H:%M:%S")
+  local list = recent[tag]
+  list[#list + 1] = stamp .. " " .. msg
+  if #list > 6 then table.remove(list, 1) end
+  local line = stamp .. " [" .. RUN_ID .. "] " .. tag .. " " .. msg .. "\n"
+  pcall(function()
+    local ok = appendfile and pcall(appendfile, LOG_FILE, line)
+    if not ok then writefile(LOG_FILE, line) end
+  end)
+end
+log("HUB", "=== BC Hub mulai ===")
+
+-- =====================================================================================================
+-- ESP
+-- =====================================================================================================
+local M_PER_STUD = 0.28
+local MAX_DIST_M = 1500
+local ESP_EVERY = 0.3
+local RESCAN_DEBOUNCE = 1
+local STREAM_EVERY = 90
+local LABEL_UP = 4
+local SUB_DIVE_Z = 1.5
+
+local TEMPLATE_KIND = {}
+local function addKind(kind, list) for _, t in ipairs(list) do TEMPLATE_KIND[t] = kind end end
+addKind("ad", { "Stinger MANPADS", "Mistral MANPADS", "Igla-S MANPADS", "AA Gun", "RapidFire", "M163 VADS", "CIWS",
+  "Mistral Launcher", "VL MICA Launcher", "S-300 Launcher", "US PAC-2 Launcher", "PatriotPac2", "Pantsir", "Iron Dome",
+  "Enduring Shield Launcher", "US PAC-3 MSE Launcher", "SAMP-TG", "S-400 Launcher", "PatriotPac3", "THAAD Launcher",
+  "S-500Launcher", "Arrow3", "Aquilla Base Launcher" })
+addKind("ew", { "Early Warning Radar" })
+addKind("rudal", { "SRBMLauncher", "IskanderLauncher", "FP-5 Flamingo Launcher", "MRBMLauncher", "FP9 Pelican Launcher",
+  "ClusterBMLauncher", "B-Strike1000Launcher", "M270Launcher", "MdCN Launcher", "ASBMLauncher", "Himars PrSM",
+  "B-STRIKE 2500 Launcher", "Zircon Launcher", "Hypersonic BM Launcher", "ATACMS Cluster Launcher", "HeavyMRBMLauncher",
+  "GLCM Launcher", "CoastalLauncher", "Dark Eagle Launcher", "B-STRIKE Hypersonic launcher", "Typhon Launcher",
+  "Blackbeard Launcher", "Hades Launcher", "M51 Launcher" })
+addKind("drone", { "LUCAS Launcher", "Switchblade Launcher", "Shahed Launcher", "Rodeur 330 Rail", "Veloce 330 Rail",
+  "Shahed-236 Launcher", "Red Wolf Launcher", "Barracuda Launcher", "One Way Effector Rail", "Karrar Launcher",
+  "Geran-5 Launcher" })
+addKind("wh", { "Medium Military Warehouse" })
+addKind("fac", { "LargeMilitaryFactory" })
+
+-- Prioritas MARK: semua tingkat 1 dulu, sisa slot ke tingkat 2, dst; dalam satu tingkat urut jarak.
+local PRIORITY_TIERS = {
+  { "aquilla", "s500", "arrow3" },
+  { "hypersonic", "zircon" },
+  { "sampt", "s400", "pac3", "earlywarningradar" },
+  { "fp9", "bstrike2500", "mrbm" },
+}
+
+local CATS = {
+  { id = "wh",    label = "Medium Warehouse",   color = Color3.fromRGB(255, 170, 40),  on = false },
+  { id = "ad",    label = "Air Defense",        color = Color3.fromRGB(255, 70, 70),   on = true },
+  { id = "ew",    label = "Early Warning (EW)", color = Color3.fromRGB(255, 140, 200), on = true },
+  { id = "rudal", label = "Missile Launcher",   color = Color3.fromRGB(220, 90, 255),  on = true },
+  { id = "drone", label = "Drone Launcher",     color = Color3.fromRGB(60, 210, 255),  on = false },
+  { id = "fac",   label = "Large Mil Factory",  color = Color3.fromRGB(255, 230, 60),  on = false },
+  { id = "ship",  label = "Ship",               color = Color3.fromRGB(90, 160, 255),  on = true },
+  { id = "sub",   label = "Submarine",          color = Color3.fromRGB(0, 255, 190),   on = true },
+}
+local CAT = {}
+for _, c in ipairs(CATS) do CAT[c.id] = c end
+local MINE_COLOR, DEAD_COLOR = Color3.fromRGB(80, 220, 80), Color3.fromRGB(150, 150, 150)
+local esp = { mine = false, hideDead = true, stream = true, status = "Siap", scanning = false, dirty = true }
+local entries = {}            -- model -> entry
+local playerOn = {}           -- UserId -> false kalau dimatikan
+
+local holder = Instance.new("Folder")
+holder.Name = "BCEspInt"
+holder.Parent = GUI_PARENT
+
+local function norm(s) return (s:lower():gsub("[^%w]", "")) end
+local function priorityOf(name)
+  local n = norm(name)
+  for i, tier in ipairs(PRIORITY_TIERS) do
+    for _, w in ipairs(tier) do if n:find(w, 1, true) then return i end end
+  end
+  return #PRIORITY_TIERS + 1
+end
+
+local function firstPart(m)
+  if m:IsA("Model") and m.PrimaryPart then return m.PrimaryPart end
+  local d = m:FindFirstChild("DetailBounds")
+  if d and d:IsA("BasePart") then return d end
+  return m:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function makeLabel(e)
+  local bb = Instance.new("BillboardGui")
+  bb.AlwaysOnTop, bb.LightInfluence, bb.ResetOnSpawn = true, 0, false
+  bb.Size = UDim2.fromOffset(260, 16)
+  bb.MaxDistance = MAX_DIST_M / M_PER_STUD
+  local t = Instance.new("TextLabel")
+  t.BackgroundTransparency, t.Size = 1, UDim2.fromScale(1, 1)
+  t.Font, t.TextSize, t.TextStrokeTransparency = Enum.Font.GothamBold, 13, 0
+  t.Parent = bb
+  if e.ship then
+    bb.Adornee = firstPart(e.model)
+    bb.StudsOffsetWorldSpace = Vector3.new(0, 12, 0)
+  else
+    local a = Instance.new("Attachment")
+    a.WorldPosition = e.point + Vector3.new(0, LABEL_UP, 0)
+    a.Parent = workspace.Terrain
+    e.att = a
+    bb.Adornee = a
+  end
+  bb.Enabled = false
+  bb.Parent = holder
+  e.bb, e.txt = bb, t
+end
+
+local function buildingEntry(m)
+  local tmpl = attr(m, "RoadTemplateName") or (m.Name:sub(1, 6) == "Placed" and m.Name:sub(7)) or m.Name
+  local kind = TEMPLATE_KIND[tmpl]
+  if not kind then return nil end
+  local p = firstPart(m)
+  if not p then return nil end
+  local gx, gz = tonumber(attr(m, "RoadGridX")), tonumber(attr(m, "RoadGridZ"))
+  local name = m.Name:sub(1, 6) == "Placed" and m.Name:sub(7) or tmpl
+  return { model = m, kind = kind, owner = tonumber(attr(m, "PlacementOwnerUserId")), name = name,
+           prio = priorityOf(name), point = (gx and gz) and Vector3.new(gx, p.Position.Y, gz) or p.Position }
+end
+
+local function shipEntry(m)
+  if not m:IsA("Model") then return nil end
+  local sub = attr(m, "Submarine") == true
+  local e = { model = m, kind = sub and "sub" or "ship", ship = true, owner = tonumber(attr(m, "OwnerUserId")),
+              name = "Ship", prio = sub and #PRIORITY_TIERS + 2 or #PRIORITY_TIERS + 1 }
+  if ShipKinds then
+    -- nama kelas lewat fungsi game: di thread sendiri, hasilnya hanya ditulis ke tabel
+    task.spawn(function()
+      local ok, n = pcall(ShipKinds.ClassName, m)
+      if ok and n then e.name = n end
+    end)
+  end
+  return e
+end
+
+local function dropEntry(m)
+  local e = entries[m]
+  if not e then return end
+  pcall(function() e.bb:Destroy() end)
+  if e.att then pcall(function() e.att:Destroy() end) end
+  entries[m] = nil
+end
+
+local function scan()
+  local seen = {}
+  local placed = workspace:FindFirstChild("PlacedRoads")
+  for _, m in ipairs(placed and placed:GetChildren() or {}) do
+    seen[m] = true
+    if not entries[m] then
+      local e = buildingEntry(m)
+      if e then makeLabel(e) entries[m] = e end
+    end
+  end
+  local ships = workspace:FindFirstChild("Ships")
+  for _, m in ipairs(ships and ships:GetChildren() or {}) do
+    seen[m] = true
+    if not entries[m] and firstPart(m) then
+      local e = shipEntry(m)
+      if e then makeLabel(e) entries[m] = e end
+    end
+  end
+  for m in pairs(entries) do if not seen[m] or not m.Parent then dropEntry(m) end end
+end
+
+local function isMine(e) return e.owner == lp.UserId end
+local function isDead(e)
+  if attr(e.model, "Destroyed") == true then return true end
+  return not e.ship and attr(e.model, "Operational") == false
+end
+local function submerged(e)
+  local mo = attr(e.model, "ShipMotion")
+  return typeof(mo) == "Vector3" and mo.Z > SUB_DIVE_Z
+end
+local function posOf(e)
+  if e.ship then
+    local ok, cf = pcall(e.model.GetPivot, e.model)
+    return ok and cf.Position or nil
+  end
+  return e.point
+end
+
+local function wanted(e, dead)
+  if not CAT[e.kind].on then return false end
+  if dead and esp.hideDead then return false end
+  if isMine(e) then return esp.mine end
+  return playerOn[e.owner] ~= false
+end
+
+local function extraInfo(e)
+  if e.ship then
+    local hp, mx = attr(e.model, "ShipHealth"), attr(e.model, "ShipHealthMax")
+    local s = (type(hp) == "number" and type(mx) == "number" and mx > 0) and (" %d%%"):format(hp / mx * 100) or ""
+    if e.kind == "sub" and submerged(e) then s = s .. " SELAM" end
+    return s
+  end
+  if e.kind == "ad" then
+    local ammo, mag = attr(e.model, "PatriotAmmo"), attr(e.model, "PatriotMagazine")
+    local s = (ammo and mag) and (" %s/%s"):format(tostring(ammo), tostring(mag)) or ""
+    if attr(e.model, "PatriotResupplying") == true then s = s .. " RELOAD" end
+    if attr(e.model, "PatriotEnabled") == false then s = s .. " OFF" end
+    return s
+  end
+  return ""
+end
+
+local function updateLabels()
+  local cam = workspace.CurrentCamera.CFrame.Position
+  for m, e in pairs(entries) do
+    if not m.Parent then dropEntry(m) continue end
+    local dead = isDead(e)
+    local show = wanted(e, dead)
+    if show then
+      local p = posOf(e)
+      local dist = p and math.floor((p - cam).Magnitude * M_PER_STUD + 0.5) or 0
+      e.txt.Text = ("%s%s [%s]%s %dm"):format(dead and "[DEAD] " or "", e.name, playerName(e.owner), extraInfo(e), dist)
+      e.txt.TextColor3 = dead and DEAD_COLOR or (isMine(e) and MINE_COLOR or CAT[e.kind].color)
+    end
+    if e.bb.Enabled ~= show then e.bb.Enabled = show end
+  end
+end
+
+local function streamAll()
+  if not workspace.StreamingEnabled then return end
+  local f = workspace:FindFirstChild("Plots")
+  for _, plot in ipairs(f and f:GetChildren() or {}) do
+    if not alive then return end
+    local ok, c = pcall(function() return plot:IsA("BasePart") and plot.Position or plot:GetPivot().Position end)
+    if ok then
+      for _, dx in ipairs({ -200, 0, 200 }) do
+        for _, dz in ipairs({ -200, 0, 200 }) do
+          pcall(lp.RequestStreamAroundAsync, lp, c + Vector3.new(dx, 0, dz), 10)
+        end
+      end
+    end
+  end
+end
+
+local function fullRescan()
+  if esp.scanning then return end
+  esp.scanning, esp.status = true, "Memuat semua plot..."
+  task.spawn(function()
+    streamAll()
+    task.wait(2)
+    local ok, err = pcall(scan)
+    local n = 0
+    for _ in pairs(entries) do n = n + 1 end
+    esp.status = ok and ("Scan: %d objek"):format(n) or ("Scan ERR: " .. tostring(err))
+    if not ok then log("ESP", esp.status) end
+    esp.scanning = false
+  end)
+end
+
+local function watchFolder(name)
+  task.spawn(function()
+    local f = workspace:WaitForChild(name, 30)
+    if not f or not alive then return end
+    connect(f.ChildAdded, function() esp.dirty = true end)
+    connect(f.ChildRemoved, function(m) dropEntry(m) end)
+    esp.dirty = true
+  end)
+end
+watchFolder("PlacedRoads")
+watchFolder("Ships")
+
+-- =====================================================================================================
+-- RUDAL: auto-mark lewat fungsi game MissileTargeting.assignTarget (getgc)
+-- =====================================================================================================
+local mis = { limit = 0, fill = false, baseKey = nil, status = "Buka targeting rudal + pilih munisi, lalu MARK", busy = false }
+
+local function bases()
+  local list = {}
+  local f = workspace:FindFirstChild("Plots")
+  for _, p in ipairs(f and f:GetChildren() or {}) do
+    local owner = tonumber(attr(p, "OwnerUserId"))
+    if owner and owner ~= lp.UserId and p:IsA("BasePart") then
+      list[#list + 1] = { key = ("%d,%d"):format(math.floor(p.Position.X), math.floor(p.Position.Z)),
+        name = ("%s (%s)"):format(tostring(attr(p, "CountryName") or "?"), playerName(owner)),
+        cx = p.Position.X, cz = p.Position.Z, hx = p.Size.X / 2, hz = p.Size.Z / 2 }
+    end
+  end
+  table.sort(list, function(a, b) return a.name < b.name end)
+  return list
+end
+local function selectedBase()
+  for _, b in ipairs(bases()) do if b.key == mis.baseKey then return b end end
+  return nil
+end
+
+local assignFn
+local function findAssign()
+  if assignFn or not getgc then return assignFn end
+  for _, f in ipairs(getgc()) do
+    if type(f) == "function" then
+      local ok, n, s = pcall(debug.info, f, "ns")
+      if ok and n == "assignTarget" and type(s) == "string" and s:find("MissileTargeting", 1, true) then
+        assignFn = f
+        return f
+      end
+    end
+  end
+  return nil
+end
+
+local STOP_WORDS = { "limit reached", "No more", "Select a munition" }
+local function isStop(msg)
+  for _, w in ipairs(STOP_WORDS) do if tostring(msg):find(w, 1, true) then return true end end
+  return false
+end
+
+local function markCandidates()
+  local cam = workspace.CurrentCamera.CFrame.Position
+  local base = selectedBase()
+  local list = {}
+  for _, e in pairs(entries) do
+    local dead = isDead(e)
+    local p = posOf(e)
+    if p and not isMine(e) and not dead and wanted(e, dead) and not (e.kind == "sub" and submerged(e))
+      and (base == nil or (math.abs(p.X - base.cx) <= base.hx and math.abs(p.Z - base.cz) <= base.hz)) then
+      list[#list + 1] = { e = e, p = p, d = (p - cam).Magnitude }
+    end
+  end
+  table.sort(list, function(a, b)
+    if a.e.prio ~= b.e.prio then return a.e.prio < b.e.prio end
+    return a.d < b.d
+  end)
+  return list
+end
+
+-- dijalankan di thread sendiri (memanggil fungsi game); hanya menulis mis.status
+local function markWork()
+  local fn = findAssign()
+  if not fn then mis.status = "assignTarget tidak ketemu (buka targeting rudal dulu)" return end
+  local limit = mis.limit > 0 and mis.limit or math.huge
+  local list = markCandidates()
+  local n, skipped, stopMsg = 0, 0, nil
+  repeat
+    local passN = 0
+    for _, c in ipairs(list) do
+      if n >= limit then break end
+      local ok, res, msg = pcall(fn, c.p, true)
+      if ok and res then
+        n, passN = n + 1, passN + 1
+      else
+        msg = ok and msg or res
+        if isStop(msg) then stopMsg = msg break end
+        skipped = skipped + 1
+      end
+    end
+  until stopMsg or not mis.fill or passN == 0 or n >= limit
+  mis.status = ("Marked %d dari %d target%s%s"):format(n, #list,
+    skipped > 0 and (", %d ditolak"):format(skipped) or "",
+    (n == 0 and stopMsg) and (" | " .. tostring(stopMsg)) or "")
+  log("MIS", mis.status)
+end
+local function mark()
+  if mis.busy then return end
+  mis.busy, mis.status = true, "Marking..."
+  task.spawn(function()
+    local ok, err = pcall(markWork)
+    if not ok then mis.status = "MARK ERR: " .. tostring(err) log("MIS", mis.status) end
+    mis.busy = false
+  end)
+end
+
+-- =====================================================================================================
+-- AUTO CAPTURE (unit darat ke zona tengah, jalan bertahap + memutar kalau blocked)
+-- =====================================================================================================
+local TICK = 3
+local LEG, LEG_MIN = 400, 40
+local STILL_STUD = 3
+local REORDER_MIN = 3
+local DETOURS = { 0, 45, -45, 90, -90 }
+local STUCK_ORDERS, STUCK_GAIN = 2, 10
+local MAX_FAILS = 6
+local BAN_SECONDS = 300
+local EDGE_INSET = 0.75
+local RETRY_TURN = 0.9
+local TICK_TIMEOUT = 20
+local DEBUG_UNITS = 8
+local PRIORITY = { "URANIUM MINE", "CITY", "INDUSTRIAL ZONE", "NUCLEAR POWER PLANT", "OIL FIELD", "MINING SITE", "AIRPORT" }
+
+local cap = { on = false, garrison = true, perZone = 3, status = "OFF", lastResult = "", tickN = 0,
+              lastTickAt = os.clock(), phase = "-", unitDebug = "", debug = true }
+local zoneOn = {}
+local assign = {}
+local banned = {}
+
+-- Judul zona dari modul game (CaptureZoneTypes) dihitung di thread kerja lalu disimpan; panel hanya membaca cache.
+local titleCache = {}
+local function cacheTitle(z)
+  if titleCache[z.Name] then return end
+  local ok, t = pcall(ZoneTypes.Get, z.Name)
+  titleCache[z.Name] = { title = ok and t and t.title or z.Name, rig = ok and t and t.oilRig == true or false }
+end
+local function zoneTitle(z)
+  local c = titleCache[z.Name]
+  if c then return c.title, c.rig end
+  return z.Name, false
+end
+local function zoneMine(z) return attr(z, "CaptureState") == "Captured" and attr(z, "CaptureOwnerUserId") == lp.UserId end
+local function zoneStatus(z)
+  local s, owner = attr(z, "CaptureState"), attr(z, "CaptureOwnerUserId")
+  if s == "Contested" then return "CONTESTED" end
+  if s ~= "Captured" or type(owner) ~= "number" or owner == 0 then return "kosong" end
+  if owner == lp.UserId then return "MILIKMU" end
+  return tostring(attr(z, "CaptureOwnerName") or owner)
+end
+local function inside(z, p)
+  local o = z.CFrame:PointToObjectSpace(p)
+  return math.abs(o.X) <= z.Size.X / 2 and math.abs(o.Z) <= z.Size.Z / 2
+end
+local function rank(z)
+  local title = zoneTitle(z)
+  for i, t in ipairs(PRIORITY) do if t == title then return i end end
+  return #PRIORITY + 1
+end
+local function zones()
+  local list = {}
+  for _, z in ipairs(CS:GetTagged("CaptureZone")) do
+    local _, rig = zoneTitle(z)
+    if z:IsA("BasePart") and z.Parent and not rig then list[#list + 1] = z end
+  end
+  table.sort(list, function(a, b)
+    local ra, rb = rank(a), rank(b)
+    if ra ~= rb then return ra < rb end
+    return a.Name < b.Name
+  end)
+  return list
+end
+local function unitName(u) return tostring(attr(u, "UnitName") or u.Name) end
+
+local function myUnits()
+  local list = {}
+  for _, folder in ipairs({ "MilitaryTrucks", "Squads" }) do
+    local f = workspace:FindFirstChild(folder)
+    for _, u in ipairs(f and f:GetChildren() or {}) do
+      if u:IsA("Model") and attr(u, "OwnerUserId") == lp.UserId and attr(u, "Destroyed") ~= true then
+        local ok, cf = pcall(u.GetPivot, u)
+        if ok then list[#list + 1] = { unit = u, pos = cf.Position } end
+      end
+    end
+  end
+  return list
+end
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+local terrainRay = RaycastParams.new()
+terrainRay.FilterType = Enum.RaycastFilterType.Include
+terrainRay.FilterDescendantsInstances = { workspace.Terrain }
+local function ground(p, z)
+  local hit = workspace:Raycast(Vector3.new(p.X, p.Y + 500, p.Z), Vector3.new(0, -2000, 0), terrainRay)
+  if hit then return hit.Position end
+  rayParams.FilterDescendantsInstances = { z, lp.Character, workspace:FindFirstChild("MilitaryTrucks"),
+    workspace:FindFirstChild("Squads") }
+  hit = workspace:Raycast(Vector3.new(p.X, p.Y + 500, p.Z), Vector3.new(0, -2000, 0), rayParams)
+  return hit and hit.Position or p
+end
+local function angleFrom(z, p)
+  local o = z.CFrame:PointToObjectSpace(p)
+  return math.atan2(o.Z, o.X)
+end
+local function edgePoint(a)
+  local z = a.zone
+  return z.CFrame:PointToWorldSpace(Vector3.new(math.cos(a.angle) * z.Size.X / 2 * EDGE_INSET, 0,
+    math.sin(a.angle) * z.Size.Z / 2 * EDGE_INSET))
+end
+local function nextStep(a, pos)
+  local goal = edgePoint(a)
+  local flat = Vector3.new(goal.X - pos.X, 0, goal.Z - pos.Z)
+  local d = flat.Magnitude
+  local turn = DETOURS[a.detour or 1]
+  if turn == 0 then return ground(d > a.leg and (pos + flat.Unit * a.leg) or goal, a.zone) end
+  local dir = CFrame.Angles(0, math.rad(turn), 0) * flat.Unit
+  return ground(pos + dir * math.min(a.leg, d), a.zone)
+end
+local function nextDetour(a)
+  a.detour = (a.detour or 1) % #DETOURS + 1
+  if a.detour == 1 then
+    a.angle = a.angle + RETRY_TURN
+    return "semua arah dicoba, pindah ke sisi lain zona"
+  end
+  return ("belok %+d derajat"):format(DETOURS[a.detour])
+end
+
+local FAIL_WORDS = { "block", "fail", "reject", "invalid", "cancel", "unreach" }
+local function isFail(st)
+  st = st:lower()
+  for _, w in ipairs(FAIL_WORDS) do if st:find(w, 1, true) then return true end end
+  return false
+end
+
+local function onOrderStatus(p)
+  if not current() or type(p) ~= "table" or p.state == "Planning" then return end
+  local reasons = {}
+  if p.reason then reasons[#reasons + 1] = tostring(p.reason) end
+  for _, r in ipairs(p.results or {}) do
+    local a = type(r) == "table" and r.unit and assign[r.unit]
+    if a then
+      local st = tostring(r.state)
+      local why = r.reason or r.message or r.error
+      if why then reasons[#reasons + 1] = tostring(why) end
+      a.result = st .. (why and (" (" .. tostring(why) .. ")") or "")
+      if isFail(st) then
+        a.fails = (a.fails or 0) + 1
+        local how = nextDetour(a)
+        a.leg = math.max(LEG_MIN, math.floor(a.leg / 2))
+        a.orderedAt = 0
+        log("CAP", ("SERVER %s: %s -> gagal %d/%d, %s, langkah %d"):format(unitName(r.unit), a.result, a.fails, MAX_FAILS, how, a.leg))
+      else
+        a.leg = math.min(LEG, a.leg * 2)
+        if (a.detour or 1) ~= 1 then a.detourDone = true end
+        if st:lower():find("arriv", 1, true) then a.orderedAt = 0 end
+      end
+    end
+  end
+  cap.lastResult = ("%s: %s moving, %s blocked%s"):format(tostring(p.state), tostring(p.moving or 0),
+    tostring(p.blocked or 0), #reasons > 0 and (" (" .. table.concat(reasons, "; ") .. ")") or "")
+end
+pcall(function() connect(GameActions.UnitOrderStatusChanged, onOrderStatus) end)
+
+local function release(u, why)
+  log("CAP", ("LEPAS %s: %s"):format(unitName(u), why))
+  assign[u] = nil
+end
+local function isBanned(u, z)
+  local b = banned[u]
+  return b ~= nil and b[z] ~= nil and b[z] > os.clock()
+end
+
+local function releaseStale(byUnit)
+  for u, a in pairs(assign) do
+    if not byUnit[u] then release(u, "unit hilang / hancur")
+    elseif not a.zone.Parent then release(u, "zona hilang (tidak ter-stream)")
+    elseif zoneOn[a.zone] == false then release(u, "zona dimatikan")
+    elseif not cap.garrison and zoneMine(a.zone) then release(u, "zona sudah direbut")
+    elseif (a.fails or 0) >= MAX_FAILS then
+      banned[u] = banned[u] or {}
+      banned[u][a.zone] = os.clock() + BAN_SECONDS
+      release(u, ("gagal %dx ke %s, diganti unit lain"):format(a.fails, (zoneTitle(a.zone))))
+    end
+  end
+end
+
+local function assignUnits(units)
+  local count = {}
+  for _, a in pairs(assign) do count[a.zone] = (count[a.zone] or 0) + 1 end
+  local pool = {}
+  for _, e in ipairs(units) do if not assign[e.unit] then pool[#pool + 1] = e end end
+  for _, z in ipairs(zones()) do
+    if zoneOn[z] ~= false and not zoneMine(z) then
+      local need = cap.perZone - (count[z] or 0)
+      while need > 0 do
+        local best, bd = nil, math.huge
+        for i, e in ipairs(pool) do
+          local d = (e.pos - z.Position).Magnitude
+          if d < bd and not isBanned(e.unit, z) then best, bd = i, d end
+        end
+        if not best then break end
+        local e = table.remove(pool, best)
+        count[z] = (count[z] or 0) + 1
+        assign[e.unit] = { zone = z, orderedAt = 0, leg = LEG, state = "baru", result = "-", fails = 0, detour = 1,
+          angle = angleFrom(z, e.pos) + (count[z] - 1) * 0.5 }
+        log("CAP", ("TUGAS %s -> %s (%d stud)"):format(unitName(e.unit), (zoneTitle(z)), math.floor(bd)))
+        need = need - 1
+      end
+    end
+  end
+end
+
+local function planOrders(byUnit)
+  local now, orders = os.clock(), {}
+  for u, a in pairs(assign) do
+    local e = byUnit[u]
+    local moving = a.lastPos and (e.pos - a.lastPos).Magnitude > STILL_STUD
+    a.lastPos = e.pos
+    a.dist = math.floor(Vector3.new(a.zone.Position.X - e.pos.X, 0, a.zone.Position.Z - e.pos.Z).Magnitude)
+    if inside(a.zone, e.pos) then
+      if a.state ~= "SAMPAI" then log("CAP", ("SAMPAI %s di %s"):format(unitName(u), (zoneTitle(a.zone)))) end
+      a.state = "SAMPAI"
+    elseif moving then
+      a.state = "jalan"
+    elseif now - a.orderedAt >= REORDER_MIN then
+      if a.bestDist and a.dist >= a.bestDist - STUCK_GAIN then a.stuck = (a.stuck or 0) + 1
+      else a.stuck, a.bestDist = 0, a.dist end
+      if a.stuck >= STUCK_ORDERS then
+        a.stuck, a.bestDist, a.detourDone = 0, nil, false
+        a.fails = (a.fails or 0) + 1
+        log("CAP", ("MACET %s sisa %d, gagal %d/%d, %s"):format(unitName(u), a.dist, a.fails, MAX_FAILS, nextDetour(a)))
+      elseif a.detourDone then
+        a.detour, a.detourDone = 1, false
+      end
+      orders[#orders + 1] = { unit = u, position = nextStep(a, e.pos) }
+      a.orderedAt, a.state = now, "diperintah"
+    else
+      a.state = ("diam, tunggu %ds"):format(math.ceil(REORDER_MIN - (now - a.orderedAt)))
+    end
+  end
+  return orders
+end
+
+local function evaluate()
+  cap.tickN, cap.lastTickAt = cap.tickN + 1, os.clock()
+  cap.phase = "zona"
+  for _, z in ipairs(CS:GetTagged("CaptureZone")) do cacheTitle(z) end
+  cap.phase = "cari unit"
+  local units = myUnits()
+  local byUnit = {}
+  for _, e in ipairs(units) do byUnit[e.unit] = e end
+  releaseStale(byUnit)
+  cap.phase = "bagi unit"
+  assignUnits(units)
+  cap.phase = "hitung langkah"
+  local orders = planOrders(byUnit)
+  if #orders > 0 then
+    task.spawn(function()
+      local ok, res = pcall(GameActions.OrderUnits, orders, "Move")
+      if not ok then log("CAP", "ERROR OrderUnits: " .. tostring(res))
+      elseif res == false then log("CAP", "OrderUnits menolak (return false)") end
+    end)
+  end
+  cap.phase = "debug"
+  local lines, n = {}, 0
+  for u, a in pairs(assign) do
+    n = n + 1
+    if #lines < DEBUG_UNITS then
+      lines[#lines + 1] = unitName(u):sub(1, 14) .. " > " .. tostring((zoneTitle(a.zone))):sub(1, 10) .. " | "
+        .. tostring(a.state) .. " | sisa " .. tostring(a.dist) .. " | step " .. tostring(a.leg)
+        .. ((a.detour or 1) ~= 1 and (" belok " .. DETOURS[a.detour]) or "") .. " | gagal " .. tostring(a.fails or 0)
+    end
+  end
+  cap.unitDebug = table.concat(lines, "\n")
+  cap.status = ("Unit darat %d, ditugaskan %d%s\nServer: %s"):format(#units, n,
+    #orders > 0 and (", perintah %d"):format(#orders) or "", cap.lastResult ~= "" and cap.lastResult or "-")
+  cap.phase = "selesai"
+end
+
+-- =====================================================================================================
+-- AUTO SHUFFLE sampai Augustus Vale (Politics.Rare, penanda r = true di pool)
+-- State dibaca sendiri dari atribut JSON (tanpa fungsi game). Statistik + riwayat disimpan per akun di workspace.
+-- =====================================================================================================
+local SHUFFLE_COST = tonumber(Politics.ShuffleCost) or 25
+local STATE_ATTR = Politics.StateAttribute or "PoliticsState"
+local READY_ATTR = Politics.ReadyAttribute or "CityHallReady"
+local SHUFFLE_GAP = 1.5
+local STATE_WAIT = 5
+local HISTORY_MAX = 30
+local ShuffleRemote = RS:WaitForChild(Politics.RemoteFolderName or "PoliticsRemotes"):WaitForChild("Shuffle")
+local STATS_FILE = "bc_shuffle_stats_" .. lp.UserId .. ".json"
+
+local shuf = { on = false, found = false, count = 0, spent = 0, fails = 0, pp = 0, ready = false,
+               status = "OFF", pool = "-", err = "", history = {} }
+pcall(function()
+  if not (isfile and isfile(STATS_FILE)) then return end
+  local saved = HttpService:JSONDecode(readfile(STATS_FILE))
+  shuf.count = tonumber(saved.count) or 0
+  shuf.spent = tonumber(saved.spent) or 0
+  shuf.fails = tonumber(saved.fails) or 0
+  if type(saved.history) == "table" then shuf.history = saved.history end
+  log("SHUF", ("lanjut dari simpanan: %d shuffle, %d PP"):format(shuf.count, shuf.spent))
+end)
+local function saveShuffle()
+  pcall(writefile, STATS_FILE, HttpService:JSONEncode({ count = shuf.count, spent = shuf.spent, fails = shuf.fails,
+    history = shuf.history }))
+end
+
+local function readPolitics()
+  local raw = lp:GetAttribute(STATE_ATTR)
+  local empty = { pp = 0, pool = {} }
+  if type(raw) ~= "string" or raw == "" then return empty end
+  local ok, t = pcall(HttpService.JSONDecode, HttpService, raw)
+  if not ok or type(t) ~= "table" then return empty end
+  return { pp = math.floor(tonumber(t.pp) or 0), pool = type(t.pool) == "table" and t.pool or {} }
+end
+local function poolText(pool)
+  local parts = {}
+  for _, c in ipairs(pool) do
+    if type(c) == "table" then
+      parts[#parts + 1] = c.r == true and "AUGUSTUS VALE 5*" or ("%s %s*"):format(tostring(c.n or "?"), tostring(c.s or "?"))
+    end
+  end
+  return #parts > 0 and table.concat(parts, ", ") or "(kosong)"
+end
+local function rareIndex(pool)
+  for i, c in ipairs(pool) do if type(c) == "table" and c.r == true then return i end end
+  return nil
+end
+local function addHistory(text)
+  table.insert(shuf.history, 1, os.date("%d/%m %H:%M") .. " " .. text)
+  while #shuf.history > HISTORY_MAX do table.remove(shuf.history) end
+end
+
+local function onFound(pool, i)
+  shuf.found, shuf.on = true, false
+  shuf.status = ("AUGUSTUS DITEMUKAN (kandidat #%d)! Buka City Hall dan appoint."):format(i)
+  addHistory(("#%d DITEMUKAN AUGUSTUS VALE"):format(shuf.count))
+  saveShuffle()
+  log("SHUF", ("DITEMUKAN Augustus slot %d setelah %d shuffle (%d PP). Pool: %s"):format(i, shuf.count, shuf.spent, poolText(pool)))
+  pcall(StarterGui.SetCore, StarterGui, "SendNotification",
+    { Title = "Auto Shuffle", Text = "Augustus Vale muncul! Buka City Hall dan appoint.", Duration = 30 })
+end
+
+local function shuffleOnce()
+  local before = lp:GetAttribute(STATE_ATTR)
+  local ok, res, msg = pcall(ShuffleRemote.InvokeServer, ShuffleRemote)
+  if not ok or res ~= true then
+    shuf.fails = shuf.fails + 1
+    shuf.err = (ok and "ditolak: " or "error: ") .. tostring(ok and (msg or res) or res)
+    addHistory("GAGAL " .. shuf.err)
+    saveShuffle()
+    log("SHUF", shuf.err)
+    return
+  end
+  shuf.count, shuf.spent, shuf.err = shuf.count + 1, shuf.spent + SHUFFLE_COST, ""
+  local t0 = os.clock()
+  while lp:GetAttribute(STATE_ATTR) == before and os.clock() - t0 < STATE_WAIT do task.wait(0.1) end
+  local s = readPolitics()
+  shuf.pp, shuf.pool = s.pp, poolText(s.pool)
+  addHistory(("#%d %s"):format(shuf.count, shuf.pool))
+  saveShuffle()
+  log("SHUF", ("#%d PP %d | %s"):format(shuf.count, s.pp, shuf.pool))
+  local i = rareIndex(s.pool)
+  if i then onFound(s.pool, i) end
+end
+
+local function shuffleStep()
+  shuf.ready = lp:GetAttribute(READY_ATTR) == true
+  local s = readPolitics()
+  shuf.pp = s.pp
+  if shuf.pool == "-" then shuf.pool = poolText(s.pool) end
+  if not shuf.on then return 1 end
+  if not shuf.ready then shuf.status = "City Hall belum jadi / belum ada" return 2 end
+  local i = rareIndex(s.pool)
+  if i then onFound(s.pool, i) return 1 end
+  if s.pp < SHUFFLE_COST then
+    shuf.status = ("Menunggu PP %d/%d"):format(s.pp, SHUFFLE_COST)
+    return 2
+  end
+  shuf.status = "Shuffle..."
+  shuffleOnce()
+  return SHUFFLE_GAP
+end
+
+-- =====================================================================================================
+-- ANTI-AFK (bersama)
+-- =====================================================================================================
+local afk = { on = true, count = 0 }
+pcall(function()
+  local VirtualUser = game:GetService("VirtualUser")
+  connect(lp.Idled, function()
+    if not current() or not afk.on then return end
+    pcall(function()
+      VirtualUser:CaptureController()
+      VirtualUser:ClickButton2(Vector2.new())
+    end)
+    afk.count = afk.count + 1
+  end)
+end)
+
+-- =====================================================================================================
+-- PANEL (satu jendela, 4 tab). Hanya membaca variabel; tidak memanggil fungsi game.
+-- =====================================================================================================
+local C = {
+  bg = Color3.fromRGB(22, 24, 30), card = Color3.fromRGB(36, 39, 48), text = Color3.fromRGB(225, 228, 235),
+  muted = Color3.fromRGB(150, 154, 165), on = Color3.fromRGB(40, 150, 80), off = Color3.fromRGB(80, 82, 92),
+  gold = Color3.fromRGB(200, 150, 30), red = Color3.fromRGB(255, 110, 110), blue = Color3.fromRGB(130, 200, 255),
+  green = Color3.fromRGB(120, 255, 120),
+}
+local function new(class, props, parent)
+  local o = Instance.new(class)
+  for k, v in pairs(props) do o[k] = v end
+  if parent then o.Parent = parent end
+  return o
+end
+local function corner(o, r) new("UICorner", { CornerRadius = UDim.new(0, r or 6) }, o) end
+
+local W, H = 330, 460
+local gui = new("ScreenGui", { Name = "BCHub", ResetOnSpawn = false, DisplayOrder = 50 })
+local frame = new("Frame", { Size = UDim2.fromOffset(W, H), Position = UDim2.new(0, 12, 0.5, -H / 2),
+  BackgroundColor3 = C.bg, BorderSizePixel = 0 }, gui)
+corner(frame, 8)
+local titleLbl = new("TextLabel", { BackgroundTransparency = 1, Position = UDim2.fromOffset(10, 6),
+  Size = UDim2.new(1, -20, 0, 20), Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = C.text,
+  TextXAlignment = Enum.TextXAlignment.Left, Text = "BC Hub  [Insert/Delete]  (seret di sini)" }, frame)
+local hubErr = new("TextLabel", { BackgroundTransparency = 1, Position = UDim2.fromOffset(10, H - 18),
+  Size = UDim2.new(1, -20, 0, 16), Font = Enum.Font.Code, TextSize = 11, TextColor3 = C.red,
+  TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Text = "" }, frame)
+
+local function clickable(b, onClick)
+  local last = 0
+  connect(b.MouseButton1Click, function()
+    if not current() or os.clock() - last < 0.35 then return end   -- emulator: klik ganda mouse+sentuh
+    last = os.clock()
+    onClick()
+  end)
+end
+
+local TABS = { "ESP", "RUDAL", "CAPTURE", "SHUFFLE" }
+local pages, tabBtns, activeTab = {}, {}, "ESP"
+local tabW = (W - 20) / #TABS
+for i, name in ipairs(TABS) do
+  local tb = new("TextButton", { Position = UDim2.fromOffset(10 + (i - 1) * tabW, 30), Size = UDim2.fromOffset(tabW - 4, 26),
+    BackgroundColor3 = C.card, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamBold, TextSize = 12,
+    TextColor3 = C.text, Text = name }, frame)
+  corner(tb)
+  clickable(tb, function() activeTab = name end)
+  tabBtns[name] = tb
+  local pg = new("ScrollingFrame", { BackgroundTransparency = 1, BorderSizePixel = 0, Position = UDim2.fromOffset(8, 90),
+    Size = UDim2.new(1, -16, 1, -112), CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    ScrollBarThickness = 4, Visible = false }, frame)
+  new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, pg)
+  new("UIPadding", { PaddingRight = UDim.new(0, 6) }, pg)
+  pages[name] = pg
+end
+local afkBtn = new("TextButton", { Position = UDim2.fromOffset(10, 60), Size = UDim2.new(1, -20, 0, 24),
+  BackgroundColor3 = C.card, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamMedium, TextSize = 12,
+  TextColor3 = C.text, Text = "" }, frame)
+corner(afkBtn)
+clickable(afkBtn, function() afk.on = not afk.on end)
+
+local order = 0
+local function nextOrder() order = order + 1 return order end
+local function textLine(pg, color, font)
+  return new("TextLabel", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    Font = font or Enum.Font.GothamMedium, TextSize = 12, TextColor3 = color or C.text, TextWrapped = true,
+    TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, Text = "",
+    LayoutOrder = nextOrder() }, pg)
+end
+local function button(pg, onClick, swatch)
+  local b = new("TextButton", { Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = C.card, BorderSizePixel = 0,
+    AutoButtonColor = false, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.text, Text = "",
+    TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = nextOrder() }, pg)
+  corner(b)
+  new("UIPadding", { PaddingLeft = UDim.new(0, swatch and 26 or 8) }, b)
+  local sw
+  if swatch then
+    sw = new("Frame", { Size = UDim2.fromOffset(11, 11), Position = UDim2.new(0, -18, 0.5, -5), BorderSizePixel = 0,
+      BackgroundColor3 = swatch }, b)
+    corner(sw, 3)
+  end
+  clickable(b, onClick)
+  return b, sw
+end
+local function input(pg, caption, placeholder, onCommit)
+  local row = new("Frame", { Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = nextOrder() }, pg)
+  new("TextLabel", { BackgroundTransparency = 1, Size = UDim2.new(0.55, 0, 1, 0), Font = Enum.Font.GothamMedium,
+    TextSize = 12, TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left, Text = caption }, row)
+  local box = new("TextBox", { Position = UDim2.new(0.55, 0, 0, 0), Size = UDim2.new(0.45, 0, 1, 0),
+    BackgroundColor3 = C.card, BorderSizePixel = 0, Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.text,
+    PlaceholderText = placeholder, PlaceholderColor3 = C.muted, ClearTextOnFocus = false, Text = "" }, row)
+  corner(box)
+  connect(box.FocusLost, function() if current() then onCommit(box) end end)
+  return box
+end
+local function numberOf(box) return tonumber((box.Text:gsub("%D", ""))) end
+
+-- ----- tab ESP -----
+local ui = {}
+do
+  local pg = pages.ESP
+  ui.espCats = {}
+  for _, c in ipairs(CATS) do
+    local b, sw = button(pg, function() c.on = not c.on end, c.color)
+    ui.espCats[c.id] = { b = b, sw = sw }
+  end
+  ui.espMine = button(pg, function() esp.mine = not esp.mine end)
+  ui.espDead = button(pg, function() esp.hideDead = not esp.hideDead end)
+  textLine(pg, C.muted).Text = "Pemain (klik untuk sembunyikan):"
+  ui.espPlayers, ui.espPlayerIds = {}, {}
+  for i = 1, 6 do
+    ui.espPlayers[i] = button(pg, function()
+      local id = ui.espPlayerIds[i]
+      if id then playerOn[id] = playerOn[id] == false end
+    end)
+  end
+  ui.espStream = button(pg, function() esp.stream = not esp.stream end)
+  ui.espScan = button(pg, function() fullRescan() end)
+  ui.espStatus = textLine(pg, C.muted)
+end
+
+-- ----- tab RUDAL -----
+do
+  local pg = pages.RUDAL
+  textLine(pg, C.muted).Text = "Buka targeting rudal + pilih munisi di game, lalu MARK (atau tombol =). Target ikut "
+    .. "kategori ESP yang ON; prioritas: Aquilla/S-500/Arrow3 > hypersonic > SAMP/S-400/PAC-3/EW > FP9/B-Strike/MRBM."
+  ui.misBase = button(pg, function()
+    local list, idx = bases(), 0
+    for i, b in ipairs(list) do if b.key == mis.baseKey then idx = i end end
+    local nxt = list[idx + 1]
+    mis.baseKey = nxt and nxt.key or nil
+  end)
+  input(pg, "Limit MARK (kosong = Auto)", "Auto", function(box)
+    local n = numberOf(box)
+    mis.limit = (n and n > 0) and math.floor(n) or 0
+    box.Text = mis.limit > 0 and tostring(mis.limit) or ""
+  end)
+  ui.misFill = button(pg, function() mis.fill = not mis.fill end)
+  ui.misMark = button(pg, function() mark() end)
+  ui.misStatus = textLine(pg)
+end
+
+-- ----- tab CAPTURE -----
+do
+  local pg = pages.CAPTURE
+  ui.capOn = button(pg, function()
+    cap.on = not cap.on
+    assign, cap.unitDebug, cap.lastTickAt = {}, "", os.clock()
+    log("CAP", "Auto Capture " .. (cap.on and "ON" or "OFF"))
+  end)
+  ui.capGar = button(pg, function() cap.garrison = not cap.garrison end)
+  local perBox = input(pg, "Unit per zona", "3", function(box)
+    local n = numberOf(box)
+    cap.perZone = (n and n > 0) and math.floor(n) or cap.perZone
+    box.Text = tostring(cap.perZone)
+    assign = {}
+    log("CAP", "Unit per zona = " .. cap.perZone)
+  end)
+  perBox.Text = tostring(cap.perZone)
+  ui.capReward = textLine(pg, C.red)
+  ui.capReward.Text = "Private server: zona TIDAK memberi hadiah"
+  ui.capZones, ui.capZoneAt = {}, {}
+  for i = 1, 10 do
+    ui.capZones[i] = button(pg, function()
+      local z = ui.capZoneAt[i]
+      if z then zoneOn[z] = zoneOn[z] == false end
+      assign = {}
+    end)
+  end
+  ui.capStatus = textLine(pg, C.muted)
+  ui.capBeat = textLine(pg)
+  ui.capDbgBtn = button(pg, function() cap.debug = not cap.debug end)
+  ui.capDbg = textLine(pg, Color3.fromRGB(190, 230, 190), Enum.Font.Code)
+end
+
+-- ----- tab SHUFFLE -----
+do
+  local pg = pages.SHUFFLE
+  ui.shufOn = button(pg, function()
+    shuf.found = false
+    shuf.on = not shuf.on
+    shuf.status = shuf.on and "ON" or "OFF"
+    log("SHUF", shuf.on and "ON" or "OFF")
+  end)
+  ui.shufStatus = textLine(pg)
+  ui.shufStats = textLine(pg, C.muted)
+  ui.shufErr = textLine(pg, C.red)
+  textLine(pg, C.muted).Text = "Pool sekarang:"
+  ui.shufPool = textLine(pg)
+  textLine(pg, C.muted).Text = ("Riwayat (terbaru di atas, %d terakhir, tersimpan di %s):"):format(HISTORY_MAX, STATS_FILE)
+  ui.shufHist = textLine(pg, nil, Enum.Font.Code)
+  button(pg, function()
+    shuf.count, shuf.spent, shuf.fails, shuf.history = 0, 0, 0, {}
+    saveShuffle()
+    log("SHUF", "statistik direset")
+  end).Text = "Reset statistik & riwayat"
+end
+
+-- ----- render -----
+local function renderESP()
+  local cnt, per = {}, {}
+  for _, e in pairs(entries) do
+    if not isMine(e) then
+      if not isDead(e) then cnt[e.kind] = (cnt[e.kind] or 0) + 1 end
+      if e.owner then per[e.owner] = (per[e.owner] or 0) + 1 end
+    end
+  end
+  for i, c in ipairs(CATS) do
+    local r = ui.espCats[c.id]
+    r.sw.BackgroundTransparency = c.on and 0 or 0.75
+    r.b.Text = ("[%d] %s (%d)"):format(i, c.label, cnt[c.id] or 0)
+    r.b.TextColor3 = c.on and C.text or C.muted
+  end
+  ui.espMine.Text = "Tampilkan milik sendiri: " .. (esp.mine and "ON" or "OFF")
+  ui.espDead.Text = "Sembunyikan yang hancur: " .. (esp.hideDead and "ON" or "OFF")
+  local ids = {}
+  for id in pairs(per) do ids[#ids + 1] = id end
+  table.sort(ids, function(a, b) return playerName(a) < playerName(b) end)
+  ui.espPlayerIds = ids
+  for i, b in ipairs(ui.espPlayers) do
+    local id = ids[i]
+    b.Visible = id ~= nil
+    if id then
+      b.Text = ("%s %s (%d)"):format(playerOn[id] == false and "[ ]" or "[x]", playerName(id), per[id])
+      b.TextColor3 = playerOn[id] == false and C.muted or C.text
+    end
+  end
+  ui.espStream.Text = ("Muat semua plot tiap %ds: %s"):format(STREAM_EVERY, esp.stream and "ON" or "OFF")
+  ui.espScan.Text = ">> Muat semua + scan ulang  [-]"
+  ui.espStatus.Text = esp.status
+end
+
+local function renderRudal()
+  local b = selectedBase()
+  ui.misBase.Text = "Base target: " .. (b and b.name or "Semua") .. "  (klik = ganti)"
+  ui.misFill.Text = "Isi semua slot (ulang daftar): " .. (mis.fill and "ON" or "OFF")
+  ui.misMark.Text = mis.busy and ">> Marking..." or ">> MARK  [=]"
+  ui.misMark.BackgroundColor3 = mis.busy and C.off or C.gold
+  ui.misStatus.Text = mis.status
+end
+
+local function renderCapture()
+  ui.capOn.Text = "Auto Capture: " .. (cap.on and "ON (klik untuk berhenti)" or "OFF (klik untuk mulai)")
+  ui.capOn.BackgroundColor3 = cap.on and C.on or C.off
+  ui.capGar.Text = "Jaga zona yang sudah direbut: " .. (cap.garrison and "ON" or "OFF")
+  ui.capReward.Visible = workspace:GetAttribute("CaptureRewardsOff") == true
+  local per = {}
+  for _, a in pairs(assign) do per[a.zone] = (per[a.zone] or 0) + 1 end
+  local list = zones()
+  for i, r in ipairs(ui.capZones) do
+    local z = list[i]
+    ui.capZoneAt[i] = z
+    r.Visible = z ~= nil
+    if z then
+      local on = zoneOn[z] ~= false
+      r.Text = ("[%s] %s - %s%s"):format(on and "x" or " ", (zoneTitle(z)), zoneStatus(z),
+        per[z] and ("  (%d unit)"):format(per[z]) or "")
+      r.TextColor3 = not on and C.muted or (zoneMine(z) and C.blue or C.text)
+    end
+  end
+  ui.capStatus.Text = cap.on and cap.status
+    or ("OFF. %d zona darat%s"):format(#list, #list == 0 and " (arahkan kamera ke tengah map)" or "")
+  local ago = os.clock() - cap.lastTickAt
+  if not cap.on then
+    ui.capBeat.Text, ui.capBeat.TextColor3 = "Loop: hidup (OFF)", C.muted
+  elseif ago <= TICK * 3 then
+    ui.capBeat.Text, ui.capBeat.TextColor3 = ("Loop: JALAN tick #%d (%.0fs lalu)"):format(cap.tickN, ago), C.green
+  else
+    ui.capBeat.Text = ("Loop: MACET %.0fs, fase '%s'"):format(ago, cap.phase)
+    ui.capBeat.TextColor3 = C.red
+  end
+  ui.capDbgBtn.Text = "Debug: " .. (cap.debug and "ON" or "OFF") .. "  (log: " .. LOG_FILE .. ")"
+  ui.capDbg.Visible = cap.debug
+  if cap.debug then
+    local lines = { cap.unitDebug ~= "" and cap.unitDebug or "(belum ada unit ditugaskan)", "-- log --" }
+    for _, l in ipairs(recent.CAP) do lines[#lines + 1] = l end
+    ui.capDbg.Text = table.concat(lines, "\n")
+  end
+end
+
+local function renderShuffle()
+  ui.shufOn.Text = shuf.on and "Auto Shuffle: ON (klik untuk berhenti)"
+    or (shuf.found and "DITEMUKAN - klik untuk lanjut" or "Auto Shuffle: OFF (klik untuk mulai)")
+  ui.shufOn.BackgroundColor3 = shuf.found and C.gold or (shuf.on and C.on or C.off)
+  ui.shufStatus.Text = shuf.status
+  ui.shufStatus.TextColor3 = shuf.found and C.gold or C.text
+  ui.shufStats.Text = ("Shuffle: %d | PP terpakai: %d | PP sekarang: %d | Gagal: %d\nCity Hall: %s | "
+    .. "Peluang Augustus ~0,05%%/shuffle (rata-rata ~2000 shuffle)")
+    :format(shuf.count, shuf.spent, shuf.pp, shuf.fails, shuf.ready and "siap" or "belum siap")
+  ui.shufErr.Text = shuf.err
+  ui.shufErr.Visible = shuf.err ~= ""
+  ui.shufPool.Text = shuf.pool
+  ui.shufHist.Text = #shuf.history > 0 and table.concat(shuf.history, "\n") or "(belum ada)"
+end
+
+local RENDER = { ESP = renderESP, RUDAL = renderRudal, CAPTURE = renderCapture, SHUFFLE = renderShuffle }
+local function render()
+  for name, tb in pairs(tabBtns) do
+    local on = name == activeTab
+    tb.BackgroundColor3 = on and C.on or C.card
+    pages[name].Visible = on
+  end
+  afkBtn.Text = ("Anti-AFK: %s%s"):format(afk.on and "ON" or "OFF", afk.count > 0 and (" (dicegah %dx)"):format(afk.count) or "")
+  RENDER[activeTab]()
+end
+
+-- seret panel dari judul (mouse atau sentuh)
+do
+  local dragging, start, origin
+  connect(titleLbl.InputBegan, function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+      dragging, start, origin = true, i.Position, frame.Position
+    end
+  end)
+  connect(UIS.InputChanged, function(i)
+    if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+      local d = i.Position - start
+      frame.Position = UDim2.new(origin.X.Scale, origin.X.Offset + d.X, origin.Y.Scale, origin.Y.Offset + d.Y)
+    end
+  end)
+  connect(UIS.InputEnded, function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+      dragging = false
+    end
+  end)
+end
+
+connect(UIS.InputBegan, function(i, processed)
+  if processed or not current() then return end
+  local k = i.KeyCode
+  if k == Enum.KeyCode.Insert or k == Enum.KeyCode.Delete then
+    gui.Enabled = not gui.Enabled
+  elseif k == Enum.KeyCode.Equals then
+    mark()
+  elseif k == Enum.KeyCode.Minus then
+    fullRescan()
+  end
+end)
+
+gui.Parent = GUI_PARENT
+
+local function stop()
+  alive = false
+  for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+  for m in pairs(entries) do dropEntry(m) end
+  pcall(function() holder:Destroy() end)
+  pcall(function() gui:Destroy() end)
+end
+G.BC_HUB = { stop = stop }
+
+local function running() return current() and gui.Parent ~= nil end
+
+-- ===== loop kerja ESP (label 3D) =====
+task.spawn(function()
+  local lastScan, lastStream = 0, os.clock()
+  while running() do
+    local now = os.clock()
+    if esp.dirty and now - lastScan >= RESCAN_DEBOUNCE then
+      esp.dirty, lastScan = false, now
+      local ok, err = pcall(scan)
+      if not ok then esp.status = "Scan ERR: " .. tostring(err) end
+    end
+    if esp.stream and now - lastStream >= STREAM_EVERY and not esp.scanning then
+      lastStream = now
+      task.spawn(function() streamAll() esp.dirty = true end)
+    end
+    pcall(updateLabels)
+    task.wait(ESP_EVERY)
+  end
+  stop()
+end)
+
+-- ===== loop kerja capture (watchdog: tick yang macet > TICK_TIMEOUT dilewati) =====
+task.spawn(function()
+  while running() do
+    pcall(function() for _, z in ipairs(CS:GetTagged("CaptureZone")) do cacheTitle(z) end end)
+    if cap.on then
+      local done = false
+      task.spawn(function()
+        local ok, err = pcall(evaluate)
+        if not ok then cap.status = "ERR: " .. tostring(err) log("CAP", "ERROR evaluate: " .. tostring(err)) end
+        done = true
+      end)
+      local t0 = os.clock()
+      while not done and os.clock() - t0 < TICK_TIMEOUT do task.wait(0.25) end
+      if not done then log("CAP", ("MACET di fase '%s' > %ds"):format(cap.phase, TICK_TIMEOUT)) end
+    end
+    task.wait(TICK)
+  end
+end)
+
+-- ===== loop kerja shuffle =====
+task.spawn(function()
+  while running() do
+    local ok, res = pcall(shuffleStep)
+    local delay = 1
+    if ok then delay = res else
+      shuf.err = "STEP error: " .. tostring(res)
+      log("SHUF", shuf.err)
+      delay = 3
+    end
+    task.wait(delay)
+  end
+end)
+
+-- ===== loop panel (hanya menggambar) =====
+task.spawn(function()
+  local lastErr = ""
+  while running() do
+    local ok, err = pcall(render)
+    local msg = ok and "" or ("Panel ERR: " .. tostring(err))
+    hubErr.Text = msg
+    if msg ~= "" and msg ~= lastErr then log("HUB", msg) end
+    lastErr = msg
+    task.wait(0.4)
+  end
+end)
+
+fullRescan()
