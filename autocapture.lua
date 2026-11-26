@@ -4,8 +4,9 @@
 -- "Have the only units inside the border to take it." Oil rig (hanya kapal) dilewati.
 -- Unit = model milik sendiri di workspace.MilitaryTrucks dan workspace.Squads, digerakkan lewat fungsi game
 -- GameActions.OrderUnits (sama seperti perintah gerak biasa; server yang menentukan jalur).
--- Perjalanan jauh dipecah per langkah (LEG stud). Kalau server menjawab "blocked", langkah unit itu
--- diperpendek (setengahnya, min LEG_MIN). Alasan dari server ditampilkan di baris status.
+-- Tujuan = tepi dalam zona yang menghadap unit (bukan tengah). Perjalanan jauh dipecah per langkah (LEG stud).
+-- Blocked / macet: langkah diperpendek dan titik diputar ke sisi lain zona; gagal MAX_FAILS kali = unit
+-- diganti unit lain (unit itu tidak dikirim ke zona itu selama BAN_SECONDS).
 -- Private server: zona tidak memberi hadiah (atribut workspace.CaptureRewardsOff), ditampilkan di panel.
 -- Jalankan ulang = versi lama berhenti sendiri (tidak perlu rejoin). Penanda versi aktif disimpan sebagai
 -- ATRIBUT di folder GUI (instance dipakai bersama semua eksekusi, getgenv/_G belum tentu): tiap loop/handler
@@ -36,7 +37,12 @@ local STILL_STUD = 3           -- gerak kurang dari ini dalam 1 tick = diam
 local REORDER_MIN = 6          -- dtk minimal antar perintah ke unit yang sama
 local STUCK_ORDERS = 2         -- perintah berturut-turut tanpa kemajuan = macet, ganti titik tujuan
 local STUCK_GAIN = 10          -- stud; kemajuan lebih kecil dari ini dianggap tidak maju
-local SPREAD = 0.3             -- unit disebar di lingkaran = SPREAD x setengah ukuran zona terkecil
+local MAX_FAILS = 3            -- macet/blocked sekian kali di satu zona -> unit diganti unit lain
+local BAN_SECONDS = 300        -- unit yang gagal tidak dikirim ke zona itu lagi selama ini
+-- Tujuan = titik di TEPI DALAM zona yang menghadap unit (bukan tengah: tengah sering lubang tambang /
+-- bangunan yang tidak bisa didatangi). Cukup masuk batas zona untuk merebutnya.
+local EDGE_INSET = 0.75        -- posisi dari tengah ke tepi (0 = tengah, 1 = tepi)
+local RETRY_TURN = 0.9         -- rad; titik baru setelah macet = diputar sejauh ini di sekeliling zona
 local PRIORITY = { "URANIUM MINE", "CITY", "INDUSTRIAL ZONE", "NUCLEAR POWER PLANT", "OIL FIELD",
   "MINING SITE", "AIRPORT" }
 
@@ -46,7 +52,7 @@ local ZoneTypes = require(RS:WaitForChild("CaptureZoneTypes"))
 local alive, enabled, garrison = true, false, true
 local perZone = 3
 local zoneOn = {}              -- zona -> false kalau dimatikan di panel
-local assign = {}              -- unit -> { zone, slot, orderedAt, lastPos, leg }
+local assign = {}              -- unit -> { zone, angle, orderedAt, lastPos, leg, fails }
 local conns = {}
 local statusText = "OFF"
 local lastResult = ""          -- jawaban server terakhir (state + alasan)
@@ -152,17 +158,23 @@ local function ground(p, z)
   return hit and hit.Position or p
 end
 
--- slot 1 = tengah; slot berikutnya melingkar. Unit yang macet pindah ke slot lain (lihat STUCK_ORDERS).
-local function slotPoint(z, slot)
-  local r = math.min(z.Size.X, z.Size.Z) / 2 * (slot > 6 and 0.6 or SPREAD)
-  local a = (slot - 1) * 2.399      -- sudut emas: sebaran rata
-  local off = slot == 1 and Vector3.zero or Vector3.new(math.cos(a) * r, 0, math.sin(a) * r)
-  return z.Position + off
+-- sudut (di ruang lokal zona) dari tengah zona ke posisi p: sisi zona yang menghadap unit
+local function angleFrom(z, p)
+  local o = z.CFrame:PointToObjectSpace(p)
+  return math.atan2(o.Z, o.X)
+end
+
+-- titik di tepi dalam zona pada sudut a.angle (diputar RETRY_TURN tiap kali unit macet)
+local function edgePoint(a)
+  local z = a.zone
+  local local_ = Vector3.new(math.cos(a.angle) * z.Size.X / 2 * EDGE_INSET, 0,
+    math.sin(a.angle) * z.Size.Z / 2 * EDGE_INSET)
+  return z.CFrame:PointToWorldSpace(local_)
 end
 
 -- tujuan langkah berikutnya: maksimal a.leg stud dari posisi unit ke arah titik zona
 local function nextStep(a, pos)
-  local goal = slotPoint(a.zone, a.slot)
+  local goal = edgePoint(a)
   local flat = Vector3.new(goal.X - pos.X, 0, goal.Z - pos.Z)
   local d = flat.Magnitude
   local target = d > a.leg and (pos + flat.Unit * a.leg) or goal
@@ -193,9 +205,12 @@ local function onOrderStatus(p)
       if a then
         a.result = st .. (why and (" (" .. tostring(why) .. ")") or "")
         if isFail(st) then
+          a.fails = (a.fails or 0) + 1
+          a.angle = a.angle + RETRY_TURN   -- titik ini ditolak: coba sisi lain zona
           a.leg = math.max(LEG_MIN, math.floor(a.leg / 2))
           a.orderedAt = 0        -- coba lagi tick berikutnya dengan langkah lebih pendek
-          log(("SERVER %s: %s -> langkah jadi %d stud"):format(unitName(r.unit), a.result, a.leg))
+          log(("SERVER %s: %s -> gagal %d/%d, coba sisi lain, langkah %d stud"):format(
+            unitName(r.unit), a.result, a.fails, MAX_FAILS, a.leg))
         else
           a.leg = math.min(LEG, a.leg * 2)   -- berhasil: langkah dipanjangkan lagi
           if st:lower():find("arriv", 1, true) then
@@ -217,6 +232,13 @@ local function release(u, why)
   assign[u] = nil
 end
 
+-- unit yang gagal MAX_FAILS kali di satu zona tidak dikirim ke zona itu selama BAN_SECONDS
+local banned = {}              -- unit -> { [zona] = os.clock() sampai kapan }
+local function isBanned(u, z)
+  local b = banned[u]
+  return b ~= nil and b[z] ~= nil and b[z] > os.clock()
+end
+
 local function evaluate()
   tickN, lastTickAt = tickN + 1, os.clock()
   phase = "cari unit"
@@ -228,6 +250,10 @@ local function evaluate()
     elseif not a.zone.Parent then release(u, "zona hilang (tidak ter-stream)")
     elseif zoneOn[a.zone] == false then release(u, "zona dimatikan di panel")
     elseif not garrison and zoneMine(a.zone) then release(u, "zona sudah direbut, pindah ke zona lain")
+    elseif (a.fails or 0) >= MAX_FAILS then
+      banned[u] = banned[u] or {}
+      banned[u][a.zone] = os.clock() + BAN_SECONDS
+      release(u, ("gagal %dx ke %s, diganti unit lain (%d dtk)"):format(a.fails, (zoneTitle(a.zone)), BAN_SECONDS))
     end
   end
   local count = {}
@@ -238,15 +264,17 @@ local function evaluate()
   for _, z in ipairs(zones()) do
     if zoneOn[z] ~= false and not zoneMine(z) then
       local need = perZone - (count[z] or 0)
-      while need > 0 and #pool > 0 do
-        local best, bd = 1, math.huge
+      while need > 0 do
+        local best, bd = nil, math.huge
         for i, e in ipairs(pool) do
           local d = (e.pos - z.Position).Magnitude
-          if d < bd then best, bd = i, d end
+          if d < bd and not isBanned(e.unit, z) then best, bd = i, d end
         end
+        if not best then break end   -- tidak ada unit bebas yang boleh ke zona ini
         local e = table.remove(pool, best)
         count[z] = (count[z] or 0) + 1
-        assign[e.unit] = { zone = z, slot = count[z], orderedAt = 0, leg = LEG, state = "baru", result = "-" }
+        assign[e.unit] = { zone = z, orderedAt = 0, leg = LEG, state = "baru", result = "-", fails = 0,
+          angle = angleFrom(z, e.pos) + (count[z] - 1) * 0.5 }   -- sisi yang menghadap unit, disebar
         log(("TUGAS %s -> %s (%d stud)"):format(unitName(e.unit), (zoneTitle(z)), math.floor(bd)))
         need = need - 1
       end
@@ -276,8 +304,10 @@ local function evaluate()
           a.stuck, a.bestDist = 0, a.dist
         end
         if a.stuck >= STUCK_ORDERS then
-          a.slot, a.stuck, a.bestDist, a.leg = a.slot + 1, 0, nil, LEG
-          log(("MACET %s di sisa %d stud, ganti titik tujuan (slot %d)"):format(unitName(u), a.dist, a.slot))
+          a.angle, a.stuck, a.bestDist, a.leg = a.angle + RETRY_TURN, 0, nil, LEG
+          a.fails = (a.fails or 0) + 1
+          log(("MACET %s di sisa %d stud, gagal %d/%d, coba sisi lain zona"):format(
+            unitName(u), a.dist, a.fails, MAX_FAILS))
         end
         orders[#orders + 1] = { unit = u, position = nextStep(a, e.pos) }
         a.orderedAt = now
@@ -288,19 +318,21 @@ local function evaluate()
     end
   end
   if #orders > 0 then
-    phase = "kirim OrderUnits"
-    local ok, res = pcall(GameActions.OrderUnits, orders, "Move")
-    phase = "catat perintah"
-    if not ok then
-      statusText = "Order ERR: " .. tostring(res)
-      log("ERROR OrderUnits: " .. tostring(res))
-      return
-    end
     for _, o in ipairs(orders) do
       local a = assign[o.unit]
       log(("PERINTAH %s langkah %d stud, sisa %d stud ke %s"):format(unitName(o.unit), a.leg, a.dist, (zoneTitle(a.zone))))
     end
-    if res == false then log("OrderUnits menolak (return false)") end
+    -- Dikirim dari thread TERPISAH: thread yang memanggil fungsi game tidak bisa lagi menulis ke panel
+    -- (di Delta tertahan selamanya = "MACET di fase render"). Thread ini tidak menyentuh GUI.
+    task.spawn(function()
+      local ok, res = pcall(GameActions.OrderUnits, orders, "Move")
+      if not ok then
+        statusText = "Order ERR: " .. tostring(res)
+        log("ERROR OrderUnits: " .. tostring(res))
+      elseif res == false then
+        log("OrderUnits menolak (return false)")
+      end
+    end)
   end
   phase = "susun teks debug"
   local okDbg, errDbg = pcall(function()
@@ -414,14 +446,12 @@ dbgRow.TextWrapped, dbgRow.TextYAlignment = true, Enum.TextYAlignment.Top
 dbgRow.Size = UDim2.fromOffset(W, ROW * 14)
 
 render = function()
-  phase = "render: tombol"
   onRow.Text = ">> Auto Capture: " .. (enabled and "ON" or "OFF")
   onRow.TextColor3 = enabled and Color3.fromRGB(120, 255, 120) or Color3.fromRGB(255, 220, 80)
   garRow.Text = "Jaga zona yang sudah direbut: " .. (garrison and "ON" or "OFF")
   rewardRow.Visible = workspace:GetAttribute("CaptureRewardsOff") == true
   local per = {}
   for _, a in pairs(assign) do per[a.zone] = (per[a.zone] or 0) + 1 end
-  phase = "render: daftar zona"
   local list = zones()
   for i, r in ipairs(zoneRows) do
     local z = list[i]
@@ -435,19 +465,16 @@ render = function()
         or (zoneMine(z) and Color3.fromRGB(130, 200, 255) or Color3.fromRGB(215, 212, 228))
     end
   end
-  phase = "render: status"
   statusRow.Text = enabled and statusText
     or ("OFF. %d zona darat ditemukan%s"):format(#list, #list == 0 and " (arahkan kamera ke tengah map)" or "")
   dbgToggle.Text = "Debug: " .. (debugOn and "ON" or "OFF") .. "  (log: " .. LOG_FILE .. ")"
   dbgRow.Visible = debugOn
   if debugOn then
-    phase = "render: teks debug"
     local lines = { unitDebug ~= "" and unitDebug or (enabled and "(belum ada unit ditugaskan)" or "(Auto Capture OFF)"),
       "-- log --" }
     for _, l in ipairs(logLines) do lines[#lines + 1] = l end
     dbgRow.Text = table.concat(lines, "\n")
   end
-  phase = "render: ukuran panel"
   local h = 0
   for _, c in ipairs(panel:GetChildren()) do
     if c:IsA("GuiObject") and c.Visible then h = h + c.Size.Y.Offset end
@@ -487,14 +514,11 @@ end
 -- Loop utama dengan watchdog: tiap tick jalan di thread sendiri. Kalau satu tick tidak selesai dalam
 -- TICK_TIMEOUT dtk, fase terakhirnya dicatat ("MACET di ...") dan loop lanjut dengan tick baru.
 local TICK_TIMEOUT = 20
-local function runTick()
+local function runTick()             -- hanya logika; panel digambar oleh loop detak di bawah
   if enabled then
     local ok, err = pcall(evaluate)
     if not ok then statusText = "ERR: " .. tostring(err) log("ERROR evaluate: " .. tostring(err)) end
   end
-  phase = "render"
-  local ok, err = pcall(render)
-  if not ok then statusRow.Text = "Panel ERR: " .. tostring(err) end
   phase = "selesai"
 end
 
@@ -512,9 +536,12 @@ task.spawn(function()
   stop()
 end)
 
--- detak terpisah: tunjukkan loop utama masih hidup atau tidak
+-- loop panel (terpisah dari logika): gambar panel + detak tiap 1 dtk. Thread ini tidak pernah memanggil
+-- fungsi game, jadi penulisan ke panel tidak tertahan.
 task.spawn(function()
   while alive and gui.Parent and current() do
+    local okR, errR = pcall(render)
+    if not okR then statusRow.Text = "Panel ERR: " .. tostring(errR) end
     local ago = os.clock() - lastTickAt
     if not enabled then
       beatRow.Text, beatRow.TextColor3 = "Loop: hidup (Auto Capture OFF)", Color3.fromRGB(150, 150, 150)
