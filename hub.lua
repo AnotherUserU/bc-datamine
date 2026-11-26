@@ -817,10 +817,107 @@ pcall(function()
 end)
 
 -- =====================================================================================================
+-- LOG PERANG (dulu combatlog.lua): hanya MENDENGAR event server soal rudal/interceptor + atribut air defense.
+-- Satu file per sesi: bccombat/<waktu>_<server>.txt, ditambah tiap 5 dtk. Event handler tidak menyentuh GUI.
+-- =====================================================================================================
+local COMBAT_DIR, COMBAT_FLUSH, COMBAT_DEPTH = "bccombat", 5, 4
+local COMBAT_WORDS = { "patriot", "missile", "radar", "intercept", "combat", "ciws", "defen", "launch", "naval", "ship", "torpedo" }
+local COMBAT_ATTRS = { "PatriotAmmo", "PatriotMagazine", "PatriotReadyAt", "PatriotResupplying", "PatriotEnabled", "Operational" }
+local combat = { on = true, file = nil, events = 0, watched = 0, remotes = 0, lines = {}, written = false }
+local combatWatched = {}
+
+local function cfmt(v, depth)
+  depth = depth or 0
+  local t = typeof(v)
+  if t == "table" then
+    if depth >= COMBAT_DEPTH then return "{...}" end
+    local parts = {}
+    for k, x in pairs(v) do parts[#parts + 1] = tostring(k) .. "=" .. cfmt(x, depth + 1) end
+    table.sort(parts)
+    return "{" .. table.concat(parts, ", ") .. "}"
+  elseif t == "Instance" then
+    local tmpl, owner = attr(v, "RoadTemplateName"), attr(v, "PlacementOwnerUserId")
+    return "<" .. v:GetFullName() .. (tmpl and (" tmpl=" .. tostring(tmpl)) or "") .. (owner and (" owner=" .. tostring(owner)) or "") .. ">"
+  elseif t == "Vector3" then
+    return ("v3(%.1f,%.1f,%.1f)"):format(v.X, v.Y, v.Z)
+  elseif t == "CFrame" then
+    return ("cf(%.0f,%.0f,%.0f)"):format(v.X, v.Y, v.Z)
+  elseif t == "number" then
+    if v == math.floor(v) and math.abs(v) < 1e15 then return ("%d"):format(v) end
+    if math.abs(v) >= 1e6 then return ("%.3f"):format(v) end
+    return ("%.5g"):format(v)
+  end
+  return tostring(v)
+end
+local function cline(text)
+  if combat.on then combat.lines[#combat.lines + 1] = ("%.3f %s"):format(workspace:GetServerTimeNow(), text) end
+end
+
+local function combatWatchBuilding(m)
+  if combatWatched[m] or not m:IsA("Model") or attr(m, "PatriotMagazine") == nil then return end
+  combatWatched[m] = true
+  combat.watched = combat.watched + 1
+  local p = m:GetPivot().Position
+  local tag = ("%s owner=%s at=(%.0f,%.0f)"):format(tostring(attr(m, "RoadTemplateName")),
+    tostring(attr(m, "PlacementOwnerUserId")), p.X, p.Z)
+  local snap = {}
+  for _, a in ipairs(COMBAT_ATTRS) do snap[#snap + 1] = a .. "=" .. cfmt(attr(m, a)) end
+  cline("ADSNAP " .. tag .. " | " .. table.concat(snap, ", "))
+  for _, a in ipairs(COMBAT_ATTRS) do
+    connect(m:GetAttributeChangedSignal(a), function() cline(("ADATTR %s | %s=%s"):format(tag, a, cfmt(attr(m, a)))) end)
+  end
+end
+
+local function combatFlush()
+  if not combat.file or #combat.lines == 0 then return end
+  local chunk = table.concat(combat.lines, "\n") .. "\n"
+  combat.lines = {}
+  if combat.written and appendfile then pcall(appendfile, combat.file, chunk)
+  else pcall(writefile, combat.file, chunk) combat.written = true end
+end
+
+local function combatStart()
+  if getgenv and getgenv().BC_COMBATLOG_STOP then pcall(getgenv().BC_COMBATLOG_STOP) end   -- combatlog.lua lama
+  pcall(makefolder, COMBAT_DIR)
+  combat.file = ("%s/%s_%s.txt"):format(COMBAT_DIR, os.date("%Y%m%d_%H%M%S"), tostring(game.JobId):sub(1, 8))
+  combat.lines[#combat.lines + 1] = "-- mulai serverTime=" .. tostring(workspace:GetServerTimeNow())
+  local found = {}
+  for _, f in ipairs(RS:GetChildren()) do
+    local low = f.Name:lower()
+    for _, w in ipairs(COMBAT_WORDS) do
+      if low:find(w, 1, true) then
+        for _, r in ipairs(f:GetDescendants()) do
+          if r:IsA("RemoteEvent") then
+            found[#found + 1] = r:GetFullName()
+            connect(r.OnClientEvent, function(...)
+              if not combat.on then return end
+              combat.events = combat.events + 1
+              local args, parts = table.pack(...), {}
+              for i = 1, args.n do parts[#parts + 1] = cfmt(args[i]) end
+              cline(r.Name .. " " .. table.concat(parts, " | "))
+            end)
+          end
+        end
+        break
+      end
+    end
+  end
+  combat.remotes = #found
+  combat.lines[#combat.lines + 1] = "-- mendengar: " .. table.concat(found, ", ")
+  local placed = workspace:FindFirstChild("PlacedRoads")
+  if placed then
+    for _, m in ipairs(placed:GetChildren()) do pcall(combatWatchBuilding, m) end
+    connect(placed.ChildAdded, function(m) task.wait(1) pcall(combatWatchBuilding, m) end)
+  end
+  log("HUB", ("log perang: %d remote, %d air defense -> %s"):format(#found, combat.watched, combat.file))
+end
+
+-- =====================================================================================================
 -- WEBHOOK: kirim bc_hub_log.txt (+ ringkasan) ke webhook Discord milikmu. URL disimpan lokal di workspace.
 -- =====================================================================================================
 local WEBHOOK_FILE = "bc_hub_webhook.txt"
 local LOG_SEND_MAX = 1000000   -- byte; hanya bagian akhir log yang dikirim kalau lebih besar
+local COMBAT_SEND_MAX = 7000000  -- byte; log perang (batas lampiran webhook Discord ~10 MB per pesan)
 local httpRequest = (syn and syn.request) or http_request or request or (http and http.request)
 local hook = { url = "", every = 0, lastSent = os.clock(), status = "Belum diatur", busy = false }
 local AUTOSEND_FILE = "bc_hub_autosend.txt"   -- menit kirim otomatis, disimpan supaya autoexec tidak reset
@@ -854,8 +951,10 @@ local unlocked = isKey(hook.url)
 if hook.url ~= "" then hook.status = unlocked and "Siap" or "URL tersimpan bukan kunci yang benar" end
 
 local function summary(note)
-  return ("**BC Hub** (%s) %s\nShuffle: %d | PP terpakai: %d | PP: %d | Gagal: %d\nCapture: %s | Anti-AFK dicegah %dx")
-    :format(lp.Name, note or "", shuf.count, shuf.spent, shuf.pp, shuf.fails, cap.on and "ON" or "OFF", afk.count)
+  return ("**BC Hub** (%s) %s\nShuffle: %d | PP terpakai: %d | PP: %d | Gagal: %d\nCapture: %s | Anti-AFK dicegah %dx"
+    .. "\nLog perang: %d event, %d air defense dilacak")
+    :format(lp.Name, note or "", shuf.count, shuf.spent, shuf.pp, shuf.fails, cap.on and "ON" or "OFF", afk.count,
+      combat.events, combat.watched)
 end
 
 local function postLog(note)
@@ -865,17 +964,28 @@ local function postLog(note)
   pcall(function() if isfile(LOG_FILE) then content = readfile(LOG_FILE) end end)
   if #content > LOG_SEND_MAX then content = "...(dipotong)\n" .. content:sub(-LOG_SEND_MAX) end
   if content == "" then content = "(log kosong)" end
+  combatFlush()
+  local war = ""
+  pcall(function() if combat.file and isfile(combat.file) then war = readfile(combat.file) end end)
+  if #war > COMBAT_SEND_MAX then war = "...(dipotong)\n" .. war:sub(-COMBAT_SEND_MAX) end
   local boundary = "----BCHub" .. RUN_ID .. math.random(100000, 999999)
   local payload = HttpService:JSONEncode({ content = summary(note):sub(1, 1900) })
-  local body = table.concat({
+  local parts = {
     "--" .. boundary,
     'Content-Disposition: form-data; name="payload_json"',
     "Content-Type: application/json", "", payload,
     "--" .. boundary,
     'Content-Disposition: form-data; name="files[0]"; filename="bc_hub_log.txt"',
     "Content-Type: text/plain", "", content,
-    "--" .. boundary .. "--", "",
-  }, "\r\n")
+  }
+  if war ~= "" then
+    local name = (combat.file:match("[^/]+$") or "bc_combatlog.txt")
+    for _, p in ipairs({ "--" .. boundary, ('Content-Disposition: form-data; name="files[1]"; filename="perang_%s"'):format(name),
+      "Content-Type: text/plain", "", war }) do parts[#parts + 1] = p end
+  end
+  parts[#parts + 1] = "--" .. boundary .. "--"
+  parts[#parts + 1] = ""
+  local body = table.concat(parts, "\r\n")
   local res = httpRequest({ Url = hook.url, Method = "POST", Body = body,
     Headers = { ["Content-Type"] = "multipart/form-data; boundary=" .. boundary } })
   local code = res and (res.StatusCode or res.Status) or 0
@@ -1115,6 +1225,8 @@ do
     pcall(writefile, AUTOSEND_FILE, tostring(hook.every / 60))
   end)
   everyBox.Text = hook.every > 0 and tostring(hook.every / 60) or ""
+  ui.combatOn = button(pg, function() combat.on = not combat.on end)
+  ui.combatInfo = textLine(pg, C.muted)
   ui.hookSend = button(pg, function() sendLog("(kirim manual)") end)
   ui.hookStatus = textLine(pg)
   textLine(pg, C.muted).Text = "Augustus ditemukan = log otomatis terkirim (kalau webhook sudah diisi)."
@@ -1219,6 +1331,10 @@ local function renderShuffle()
 end
 
 local function renderLog()
+  ui.combatOn.Text = "Log perang (rudal & intercept): " .. (combat.on and "ON" or "OFF")
+  ui.combatOn.BackgroundColor3 = combat.on and C.on or C.off
+  ui.combatInfo.Text = ("%d event, %d air defense dilacak, %d remote\nFile: %s"):format(
+    combat.events, combat.watched, combat.remotes, combat.file or "(belum mulai)")
   ui.hookSend.Text = hook.busy and ">> Mengirim..." or ">> Kirim log sekarang"
   ui.hookSend.BackgroundColor3 = hook.busy and C.off or C.on
   ui.hookStatus.Text = ("Webhook: %s | otomatis: %s\nStatus: %s"):format(
@@ -1378,6 +1494,19 @@ task.spawn(function()
     end
     task.wait(delay)
   end
+end)
+
+-- ===== log perang: mulai setelah kunci dibuka, tulis ke file tiap COMBAT_FLUSH dtk =====
+task.spawn(function()
+  waitUnlock()
+  if not running() then return end
+  local ok, err = pcall(combatStart)
+  if not ok then log("HUB", "log perang gagal mulai: " .. tostring(err)) end
+  while running() do
+    task.wait(COMBAT_FLUSH)
+    combatFlush()
+  end
+  combatFlush()
 end)
 
 -- ===== kirim log otomatis ke webhook =====
