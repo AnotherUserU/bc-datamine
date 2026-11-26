@@ -295,14 +295,14 @@ end
 
 local function fullRescan()
   if esp.scanning then return end
-  esp.scanning, esp.status = true, "Memuat semua plot..."
+  esp.scanning, esp.status = true, "Mencari target..."
   task.spawn(function()
     streamAll()
     task.wait(2)
     local ok, err = pcall(scan)
     local n = 0
     for _ in pairs(entries) do n = n + 1 end
-    esp.status = ok and ("Scan: %d objek"):format(n) or ("Scan ERR: " .. tostring(err))
+    esp.status = ok and ("Ketemu %d target"):format(n) or ("Scan ERR: " .. tostring(err))
     if not ok then log("ESP", esp.status) end
     esp.scanning = false
   end)
@@ -323,7 +323,7 @@ watchFolder("Ships")
 -- =====================================================================================================
 -- RUDAL: auto-mark lewat fungsi game MissileTargeting.assignTarget (getgc)
 -- =====================================================================================================
-local mis = { limit = 0, fill = false, baseKey = nil, status = "Buka targeting rudal + pilih munisi, lalu MARK", busy = false }
+local mis = { limit = 0, fill = false, baseKey = nil, status = "Siap. Buka menu target rudal di game dulu.", busy = false }
 
 local function bases()
   local list = {}
@@ -387,7 +387,7 @@ end
 -- dijalankan di thread sendiri (memanggil fungsi game); hanya menulis mis.status
 local function markWork()
   local fn = findAssign()
-  if not fn then mis.status = "assignTarget tidak ketemu (buka targeting rudal dulu)" return end
+  if not fn then mis.status = "Gagal: buka menu target rudal di game dulu, lalu coba lagi." return end
   local limit = mis.limit > 0 and mis.limit or math.huge
   local list = markCandidates()
   local n, skipped, stopMsg = 0, 0, nil
@@ -405,8 +405,8 @@ local function markWork()
       end
     end
   until stopMsg or not mis.fill or passN == 0 or n >= limit
-  mis.status = ("Marked %d dari %d target%s%s"):format(n, #list,
-    skipped > 0 and (", %d ditolak"):format(skipped) or "",
+  mis.status = ("Berhasil menandai %d dari %d target%s%s"):format(n, #list,
+    skipped > 0 and (", %d tidak bisa"):format(skipped) or "",
     (n == 0 and stopMsg) and (" | " .. tostring(stopMsg)) or "")
   log("MIS", mis.status)
 end
@@ -688,8 +688,8 @@ local function evaluate()
     end
   end
   cap.unitDebug = table.concat(lines, "\n")
-  cap.status = ("Unit darat %d, ditugaskan %d%s\nServer: %s"):format(#units, n,
-    #orders > 0 and (", perintah %d"):format(#orders) or "", cap.lastResult ~= "" and cap.lastResult or "-")
+  cap.status = ("Unit darat kamu: %d, sedang dikirim: %d%s\nJawaban game: %s"):format(#units, n,
+    #orders > 0 and (", baru diperintah: %d"):format(#orders) or "", cap.lastResult ~= "" and cap.lastResult or "-")
   cap.phase = "selesai"
 end
 
@@ -750,7 +750,7 @@ end
 
 local function onFound(pool, i)
   shuf.found, shuf.on = true, false
-  shuf.status = ("AUGUSTUS DITEMUKAN (kandidat #%d)! Buka City Hall dan appoint."):format(i)
+  shuf.status = ("AUGUSTUS KETEMU (kandidat ke-%d)! Buka City Hall lalu angkat dia."):format(i)
   addHistory(("#%d DITEMUKAN AUGUSTUS VALE"):format(shuf.count))
   saveShuffle()
   log("SHUF", ("DITEMUKAN Augustus slot %d setelah %d shuffle (%d PP). Pool: %s"):format(i, shuf.count, shuf.spent, poolText(pool)))
@@ -788,14 +788,14 @@ local function shuffleStep()
   shuf.pp = s.pp
   if shuf.pool == "-" then shuf.pool = poolText(s.pool) end
   if not shuf.on then return 1 end
-  if not shuf.ready then shuf.status = "City Hall belum jadi / belum ada" return 2 end
+  if not shuf.ready then shuf.status = "City Hall kamu belum ada / belum selesai dibangun" return 2 end
   local i = rareIndex(s.pool)
   if i then onFound(s.pool, i) return 1 end
   if s.pp < SHUFFLE_COST then
-    shuf.status = ("Menunggu PP %d/%d"):format(s.pp, SHUFFLE_COST)
+    shuf.status = ("Menunggu PP cukup: %d dari %d"):format(s.pp, SHUFFLE_COST)
     return 2
   end
-  shuf.status = "Shuffle..."
+  shuf.status = "Sedang shuffle..."
   shuffleOnce()
   return SHUFFLE_GAP
 end
@@ -859,12 +859,12 @@ local function summary(note)
 end
 
 local function postLog(note)
-  if not httpRequest then error("executor tidak punya fungsi request") end
-  if not validWebhook(hook.url) then error("URL webhook belum diisi / tidak valid") end
+  if not httpRequest then error("executor ini tidak bisa kirim ke internet") end
+  if not validWebhook(hook.url) then error("kunci belum diisi") end
   local content = ""
   pcall(function() if isfile(LOG_FILE) then content = readfile(LOG_FILE) end end)
   if #content > LOG_SEND_MAX then content = "...(dipotong)\n" .. content:sub(-LOG_SEND_MAX) end
-  if content == "" then content = "(log kosong)" end
+  if content == "" then content = "(belum ada catatan)" end
   local boundary = "----BCHub" .. RUN_ID .. math.random(100000, 999999)
   local payload = HttpService:JSONEncode({ content = summary(note):sub(1, 1900) })
   local body = table.concat({
@@ -886,10 +886,10 @@ end
 
 sendLog = function(note)
   if hook.busy then return end
-  hook.busy, hook.status = true, "Mengirim..."
+  hook.busy, hook.status = true, "Sedang mengirim..."
   task.spawn(function()
     local ok, err = pcall(postLog, note)
-    hook.status = ok and ("Terkirim " .. os.date("%H:%M:%S")) or ("Gagal: " .. tostring(err))
+    hook.status = ok and ("Terkirim jam " .. os.date("%H:%M")) or ("Gagal: " .. tostring(err))
     if not ok then log("HUB", "webhook " .. hook.status) end
     hook.lastSent, hook.busy = os.clock(), false
   end)
@@ -919,7 +919,7 @@ local frame = new("Frame", { Size = UDim2.fromOffset(W, H), Position = UDim2.new
 corner(frame, 8)
 local titleLbl = new("TextLabel", { BackgroundTransparency = 1, Position = UDim2.fromOffset(10, 6),
   Size = UDim2.new(1, -20, 0, 20), Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = C.text,
-  TextXAlignment = Enum.TextXAlignment.Left, Text = "BC Hub  [Insert/Delete]  (seret di sini)" }, frame)
+  TextXAlignment = Enum.TextXAlignment.Left, Text = "BC Hub   (tahan di sini untuk geser)" }, frame)
 local hubErr = new("TextLabel", { BackgroundTransparency = 1, Position = UDim2.fromOffset(10, H - 18),
   Size = UDim2.new(1, -20, 0, 16), Font = Enum.Font.Code, TextSize = 11, TextColor3 = C.red,
   TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Text = "" }, frame)
@@ -1004,7 +1004,7 @@ do
   end
   ui.espMine = button(pg, function() esp.mine = not esp.mine end)
   ui.espDead = button(pg, function() esp.hideDead = not esp.hideDead end)
-  textLine(pg, C.muted).Text = "Pemain (klik untuk sembunyikan):"
+  textLine(pg, C.muted).Text = "Pemain (klik nama untuk sembunyikan/tampilkan):"
   ui.espPlayers, ui.espPlayerIds = {}, {}
   for i = 1, 6 do
     ui.espPlayers[i] = button(pg, function()
@@ -1020,15 +1020,16 @@ end
 -- ----- tab RUDAL -----
 do
   local pg = pages.RUDAL
-  textLine(pg, C.muted).Text = "Buka targeting rudal + pilih munisi di game, lalu MARK (atau tombol =). Target ikut "
-    .. "kategori ESP yang ON; prioritas: Aquilla/S-500/Arrow3 > hypersonic > SAMP/S-400/PAC-3/EW > FP9/B-Strike/MRBM."
+  textLine(pg, C.muted).Text = "Cara pakai: di game buka menu target rudal dan pilih rudalnya, lalu tekan tombol MARK di bawah "
+    .. "(atau tombol = di keyboard). Yang ditandai hanya jenis yang NYALA di tab ESP. Pertahanan udara "
+    .. "terkuat ditandai duluan."
   ui.misBase = button(pg, function()
     local list, idx = bases(), 0
     for i, b in ipairs(list) do if b.key == mis.baseKey then idx = i end end
     local nxt = list[idx + 1]
     mis.baseKey = nxt and nxt.key or nil
   end)
-  input(pg, "Limit MARK", "Auto (kosong)", function(box)
+  input(pg, "Jumlah target", "kosong = semua", function(box)
     local n = numberOf(box)
     mis.limit = (n and n > 0) and math.floor(n) or 0
     box.Text = mis.limit > 0 and tostring(mis.limit) or ""
@@ -1047,7 +1048,7 @@ do
     log("CAP", "Auto Capture " .. (cap.on and "ON" or "OFF"))
   end)
   ui.capGar = button(pg, function() cap.garrison = not cap.garrison end)
-  local perBox = input(pg, "Unit per zona", "3", function(box)
+  local perBox = input(pg, "Jumlah unit tiap zona", "3", function(box)
     local n = numberOf(box)
     cap.perZone = (n and n > 0) and math.floor(n) or cap.perZone
     box.Text = tostring(cap.perZone)
@@ -1056,7 +1057,7 @@ do
   end)
   perBox.Text = tostring(cap.perZone)
   ui.capReward = textLine(pg, C.red)
-  ui.capReward.Text = "Private server: zona TIDAK memberi hadiah"
+  ui.capReward.Text = "Ini private server: merebut zona tidak dapat hadiah."
   ui.capZones, ui.capZoneAt = {}, {}
   for i = 1, 10 do
     ui.capZones[i] = button(pg, function()
@@ -1077,38 +1078,38 @@ do
   ui.shufOn = button(pg, function()
     shuf.found = false
     shuf.on = not shuf.on
-    shuf.status = shuf.on and "ON" or "OFF"
+    shuf.status = shuf.on and "Nyala" or "Mati"
     log("SHUF", shuf.on and "ON" or "OFF")
   end)
   ui.shufStatus = textLine(pg)
   ui.shufStats = textLine(pg, C.muted)
   ui.shufErr = textLine(pg, C.red)
-  textLine(pg, C.muted).Text = "Pool sekarang:"
+  textLine(pg, C.muted).Text = "Kandidat sekarang:"
   ui.shufPool = textLine(pg)
-  textLine(pg, C.muted).Text = ("Riwayat (terbaru di atas, %d terakhir, tersimpan di %s):"):format(HISTORY_MAX, STATS_FILE)
+  textLine(pg, C.muted).Text = ("Riwayat %d shuffle terakhir (paling baru di atas):"):format(HISTORY_MAX)
   ui.shufHist = textLine(pg, nil, Enum.Font.Code)
   button(pg, function()
     shuf.count, shuf.spent, shuf.fails, shuf.history = 0, 0, 0, {}
     saveShuffle()
     log("SHUF", "statistik direset")
-  end).Text = "Reset statistik & riwayat"
+  end).Text = "Hapus hitungan & riwayat"
 end
 
 -- ----- tab LOG -----
 do
   local pg = pages.LOG
-  textLine(pg, C.muted).Text = "Semua fitur menulis ke satu file: " .. LOG_FILE .. " (workspace Delta). Log bisa dikirim "
-    .. "sebagai file .txt ke webhook Discord milikmu. Webhook = rahasia, jangan dibagikan."
-  local urlBox = input(pg, "URL webhook", "https://discord.com/api/webhooks/...", function(box)
+  textLine(pg, C.muted).Text = "Semua catatan script tersimpan di satu file: " .. LOG_FILE .. ". Catatan ini bisa dikirim ke "
+    .. "Discord sebagai file .txt."
+  local urlBox = input(pg, "Ganti kunci", "tempel kunci baru", function(box)
     local url = box.Text:gsub("%s", "")
     if url == "" then return end
-    if not isKey(url) then hook.status = "Bukan URL webhook kunci yang benar" return end
+    if not isKey(url) then hook.status = "Kunci salah" return end
     hook.url, hook.status = url, "Tersimpan"
     pcall(writefile, WEBHOOK_FILE, url)
     box.Text = ""
   end)
   urlBox.TextTruncate = Enum.TextTruncate.AtEnd
-  local everyBox = input(pg, "Auto kirim (menit)", "0 = mati", function(box)
+  local everyBox = input(pg, "Kirim otomatis tiap ... menit", "0 = tidak", function(box)
     local n = numberOf(box)
     hook.every = (n and n > 0) and n * 60 or 0
     box.Text = hook.every > 0 and tostring(hook.every / 60) or ""
@@ -1117,7 +1118,7 @@ do
   everyBox.Text = hook.every > 0 and tostring(hook.every / 60) or ""
   ui.hookSend = button(pg, function() sendLog("(kirim manual)") end)
   ui.hookStatus = textLine(pg)
-  textLine(pg, C.muted).Text = "Augustus ditemukan = log otomatis terkirim (kalau webhook sudah diisi)."
+  textLine(pg, C.muted).Text = "Kalau Augustus ketemu, catatan langsung dikirim otomatis."
   ui.hookTail = textLine(pg, Color3.fromRGB(190, 230, 190), Enum.Font.Code)
 end
 
@@ -1136,8 +1137,8 @@ local function renderESP()
     r.b.Text = ("[%d] %s (%d)"):format(i, c.label, cnt[c.id] or 0)
     r.b.TextColor3 = c.on and C.text or C.muted
   end
-  ui.espMine.Text = "Tampilkan milik sendiri: " .. (esp.mine and "ON" or "OFF")
-  ui.espDead.Text = "Sembunyikan yang hancur: " .. (esp.hideDead and "ON" or "OFF")
+  ui.espMine.Text = "Tampilkan bangunan sendiri: " .. (esp.mine and "YA" or "TIDAK")
+  ui.espDead.Text = "Sembunyikan yang sudah hancur: " .. (esp.hideDead and "YA" or "TIDAK")
   local ids = {}
   for id in pairs(per) do ids[#ids + 1] = id end
   table.sort(ids, function(a, b) return playerName(a) < playerName(b) end)
@@ -1150,24 +1151,24 @@ local function renderESP()
       b.TextColor3 = playerOn[id] == false and C.muted or C.text
     end
   end
-  ui.espStream.Text = ("Muat semua plot tiap %ds: %s"):format(STREAM_EVERY, esp.stream and "ON" or "OFF")
-  ui.espScan.Text = ">> Muat semua + scan ulang  [-]"
+  ui.espStream.Text = ("Muat base yang jauh otomatis: %s"):format(esp.stream and "NYALA" or "MATI")
+  ui.espScan.Text = ">> Cari ulang semua target  (tombol -)"
   ui.espStatus.Text = esp.status
 end
 
 local function renderRudal()
   local b = selectedBase()
-  ui.misBase.Text = "Base target: " .. (b and b.name or "Semua") .. "  (klik = ganti)"
-  ui.misFill.Text = "Isi semua slot (ulang daftar): " .. (mis.fill and "ON" or "OFF")
-  ui.misMark.Text = mis.busy and ">> Marking..." or ">> MARK  [=]"
+  ui.misBase.Text = "Target base: " .. (b and b.name or "Semua base") .. "  (klik untuk ganti)"
+  ui.misFill.Text = "Isi semua rudal sampai penuh: " .. (mis.fill and "YA" or "TIDAK")
+  ui.misMark.Text = mis.busy and ">> Menandai..." or ">> MARK (tandai target)"
   ui.misMark.BackgroundColor3 = mis.busy and C.off or C.gold
   ui.misStatus.Text = mis.status
 end
 
 local function renderCapture()
-  ui.capOn.Text = "Auto Capture: " .. (cap.on and "ON (klik untuk berhenti)" or "OFF (klik untuk mulai)")
+  ui.capOn.Text = "Rebut zona otomatis: " .. (cap.on and "NYALA (klik untuk matikan)" or "MATI (klik untuk nyalakan)")
   ui.capOn.BackgroundColor3 = cap.on and C.on or C.off
-  ui.capGar.Text = "Jaga zona yang sudah direbut: " .. (cap.garrison and "ON" or "OFF")
+  ui.capGar.Text = "Unit tetap jaga zona yang sudah direbut: " .. (cap.garrison and "YA" or "TIDAK")
   ui.capReward.Visible = workspace:GetAttribute("CaptureRewardsOff") == true
   local per = {}
   for _, a in pairs(assign) do per[a.zone] = (per[a.zone] or 0) + 1 end
@@ -1184,34 +1185,34 @@ local function renderCapture()
     end
   end
   ui.capStatus.Text = cap.on and cap.status
-    or ("OFF. %d zona darat%s"):format(#list, #list == 0 and " (arahkan kamera ke tengah map)" or "")
+    or ("Mati. Ada %d zona.%s Klik nama zona untuk lewati/ikutkan."):format(#list, #list == 0 and " Geser kamera ke tengah peta dulu." or "")
   local ago = os.clock() - cap.lastTickAt
   if not cap.on then
-    ui.capBeat.Text, ui.capBeat.TextColor3 = "Loop: hidup (OFF)", C.muted
+    ui.capBeat.Text, ui.capBeat.TextColor3 = "Status: mati", C.muted
   elseif ago <= TICK * 3 then
-    ui.capBeat.Text, ui.capBeat.TextColor3 = ("Loop: JALAN tick #%d (%.0fs lalu)"):format(cap.tickN, ago), C.green
+    ui.capBeat.Text, ui.capBeat.TextColor3 = ("Status: berjalan normal (cek terakhir %.0f detik lalu)"):format(ago), C.green
   else
-    ui.capBeat.Text = ("Loop: MACET %.0fs, fase '%s'"):format(ago, cap.phase)
+    ui.capBeat.Text = ("Status: macet %.0f detik (di bagian '%s')"):format(ago, cap.phase)
     ui.capBeat.TextColor3 = C.red
   end
-  ui.capDbgBtn.Text = "Debug: " .. (cap.debug and "ON" or "OFF") .. "  (log: " .. LOG_FILE .. ")"
+  ui.capDbgBtn.Text = "Detail unit: " .. (cap.debug and "TAMPIL" or "SEMBUNYI")
   ui.capDbg.Visible = cap.debug
   if cap.debug then
-    local lines = { cap.unitDebug ~= "" and cap.unitDebug or "(belum ada unit ditugaskan)", "-- log --" }
+    local lines = { cap.unitDebug ~= "" and cap.unitDebug or "(belum ada unit yang dikirim)", "-- log --" }
     for _, l in ipairs(recent.CAP) do lines[#lines + 1] = l end
     ui.capDbg.Text = table.concat(lines, "\n")
   end
 end
 
 local function renderShuffle()
-  ui.shufOn.Text = shuf.on and "Auto Shuffle: ON (klik untuk berhenti)"
-    or (shuf.found and "DITEMUKAN - klik untuk lanjut" or "Auto Shuffle: OFF (klik untuk mulai)")
+  ui.shufOn.Text = shuf.on and "Shuffle otomatis: NYALA (klik untuk matikan)"
+    or (shuf.found and "AUGUSTUS KETEMU! (klik untuk shuffle lagi)" or "Shuffle otomatis: MATI (klik untuk nyalakan)")
   ui.shufOn.BackgroundColor3 = shuf.found and C.gold or (shuf.on and C.on or C.off)
   ui.shufStatus.Text = shuf.status
   ui.shufStatus.TextColor3 = shuf.found and C.gold or C.text
-  ui.shufStats.Text = ("Shuffle: %d | PP terpakai: %d | PP sekarang: %d | Gagal: %d\nCity Hall: %s | "
-    .. "Peluang Augustus ~0,05%%/shuffle (rata-rata ~2000 shuffle)")
-    :format(shuf.count, shuf.spent, shuf.pp, shuf.fails, shuf.ready and "siap" or "belum siap")
+  ui.shufStats.Text = ("Sudah shuffle: %d kali | PP terpakai: %d\nPP sekarang: %d | Gagal: %d | City Hall: %s\n"
+    .. "Augustus sangat langka: rata-rata baru muncul setelah ~2000 kali shuffle.")
+    :format(shuf.count, shuf.spent, shuf.pp, shuf.fails, shuf.ready and "siap" or "belum jadi")
   ui.shufErr.Text = shuf.err
   ui.shufErr.Visible = shuf.err ~= ""
   ui.shufPool.Text = shuf.pool
@@ -1219,16 +1220,16 @@ local function renderShuffle()
 end
 
 local function renderLog()
-  ui.hookSend.Text = hook.busy and ">> Mengirim..." or ">> Kirim log sekarang"
+  ui.hookSend.Text = hook.busy and ">> Sedang mengirim..." or ">> Kirim catatan ke Discord sekarang"
   ui.hookSend.BackgroundColor3 = hook.busy and C.off or C.on
-  ui.hookStatus.Text = ("Webhook: %s | otomatis: %s\nStatus: %s"):format(
-    validWebhook(hook.url) and ("..." .. hook.url:sub(-6)) or "belum diisi",
-    hook.every > 0 and ("tiap %d menit"):format(hook.every / 60) or "mati", hook.status)
+  ui.hookStatus.Text = ("Kunci: %s | Kirim otomatis: %s\nKeterangan: %s"):format(
+    validWebhook(hook.url) and "sudah diisi" or "belum diisi",
+    hook.every > 0 and ("tiap %d menit"):format(hook.every / 60) or "tidak", hook.status)
   local lines = {}
   for _, tag in ipairs({ "HUB", "SHUF", "CAP", "MIS" }) do
     for _, l in ipairs(recent[tag]) do lines[#lines + 1] = tag .. " " .. l end
   end
-  ui.hookTail.Text = #lines > 0 and table.concat(lines, "\n") or "(log kosong)"
+  ui.hookTail.Text = #lines > 0 and table.concat(lines, "\n") or "(belum ada catatan)"
 end
 
 local RENDER = { ESP = renderESP, RUDAL = renderRudal, CAPTURE = renderCapture, SHUFFLE = renderShuffle, LOG = renderLog }
@@ -1238,7 +1239,7 @@ local function render()
     tb.BackgroundColor3 = on and C.on or C.card
     pages[name].Visible = on
   end
-  afkBtn.Text = ("Anti-AFK: %s%s"):format(afk.on and "ON" or "OFF", afk.count > 0 and (" (dicegah %dx)"):format(afk.count) or "")
+  afkBtn.Text = ("Anti-AFK (tidak ditendang saat diam): %s%s"):format(afk.on and "NYALA" or "MATI", afk.count > 0 and (", %dx"):format(afk.count) or "")
   RENDER[activeTab]()
 end
 
@@ -1284,22 +1285,22 @@ local function showWebhookPrompt()
   new("TextLabel", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 8), Size = UDim2.new(1, -24, 0, 54),
     Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = C.text, TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
-    Text = "BC Hub terkunci. Tempel URL webhook (kunci) dari pemilik script. Log kamu (.txt) akan dikirim ke "
-      .. "channel Discord pemilik kunci. Disimpan lokal di Delta, cukup sekali." }, box)
+    Text = "Masukkan kunci untuk membuka BC Hub.\nKunci = link webhook dari pemilik script. Cukup sekali, "
+      .. "nanti tersimpan otomatis. Catatan kamu akan dikirim ke Discord pemilik kunci." }, box)
   local field = new("TextBox", { Position = UDim2.fromOffset(12, 66), Size = UDim2.new(1, -24, 0, 30),
     BackgroundColor3 = C.card, BorderSizePixel = 0, Font = Enum.Font.Code, TextSize = 12, TextColor3 = C.text,
-    PlaceholderText = "https://discord.com/api/webhooks/...", PlaceholderColor3 = C.muted, ClearTextOnFocus = false,
+    PlaceholderText = "Tempel kunci di sini", PlaceholderColor3 = C.muted, ClearTextOnFocus = false,
     TextTruncate = Enum.TextTruncate.AtEnd, Text = "" }, box)
   corner(field)
   local msg = new("TextLabel", { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 100), Size = UDim2.new(1, -24, 0, 18),
     Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = C.red, TextXAlignment = Enum.TextXAlignment.Left, Text = "" }, box)
   local save = new("TextButton", { Position = UDim2.fromOffset(12, 126), Size = UDim2.new(1, -24, 0, 32),
     BackgroundColor3 = C.on, BorderSizePixel = 0, Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = C.text,
-    Text = "Buka kunci & mulai" }, box)
+    Text = "Buka" }, box)
   corner(save)
   clickable(save, function()
     local url = field.Text:gsub("%s", "")
-    if not isKey(url) then msg.Text = "Kunci salah. Minta URL webhook yang benar ke pemilik script." return end
+    if not isKey(url) then msg.Text = "Kunci salah. Minta kunci yang benar ke pemilik script." return end
     hook.url, hook.status = url, "Tersimpan"
     pcall(writefile, WEBHOOK_FILE, url)
     log("HUB", "kunci benar, hub dibuka")
