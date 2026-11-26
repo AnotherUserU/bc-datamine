@@ -1231,11 +1231,30 @@ for i, name in ipairs(TABS) do
   new("UIPadding", { PaddingRight = UDim.new(0, 6) }, pg)
   pages[name] = pg
 end
-local afkBtn = new("TextButton", { Position = UDim2.fromOffset(10, 60), Size = UDim2.new(1, -20, 0, 24),
-  BackgroundColor3 = C.card, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamMedium, TextSize = 12,
-  TextColor3 = C.text, Text = "" }, frame)
-corner(afkBtn)
-clickable(afkBtn, function() afk.on = not afk.on end)
+-- Baris atas: 3 tombol umum (Anti-AFK | Mode ringan | Sembunyikan gedung)
+-- Mode ringan: dunia 3D tidak digambar + FPS dibatasi. Logika script tetap jalan; label ESP baru terlihat lagi
+-- setelah mode ringan dimatikan.
+local LIGHT_FPS, NORMAL_FPS = 10, 60
+local light = { on = false }
+local RunService = game:GetService("RunService")
+local function setLight(on)
+  light.on = on
+  pcall(function() RunService:Set3dRenderingEnabled(not on) end)
+  if setfpscap then pcall(setfpscap, on and LIGHT_FPS or NORMAL_FPS) end
+  log("HUB", "mode ringan: " .. (on and "ON" or "OFF"))
+end
+local topW = (W - 20) / 3
+local function topButton(i, onClick)
+  local b = new("TextButton", { Position = UDim2.fromOffset(10 + (i - 1) * topW, 60), Size = UDim2.fromOffset(topW - 4, 24),
+    BackgroundColor3 = C.card, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamMedium, TextSize = 11,
+    TextColor3 = C.text, Text = "" }, frame)
+  corner(b)
+  clickable(b, onClick)
+  return b
+end
+local afkBtn = topButton(1, function() afk.on = not afk.on end)
+local lightBtn = topButton(2, function() setLight(not light.on) end)
+local hideBtn = topButton(3, function() setHide(not hideOpt.on) end)
 
 local order = 0
 local function nextOrder() order = order + 1 return order end
@@ -1293,7 +1312,6 @@ do
       if id then playerOn[id] = playerOn[id] == false end
     end)
   end
-  ui.espHide = button(pg, function() setHide(not hideOpt.on) end)
   ui.espStream = button(pg, function() esp.stream = not esp.stream end)
   ui.espScan = button(pg, function() fullRescan() end)
   ui.espStatus = textLine(pg, C.muted)
@@ -1434,9 +1452,6 @@ local function renderESP()
       b.TextColor3 = playerOn[id] == false and C.muted or C.text
     end
   end
-  ui.espHide.Text = ("Sembunyikan gedung selain AD & rudal: %s%s"):format(hideOpt.on and "ON" or "OFF",
-    hideOpt.on and (" (%d)"):format(hideOpt.count) or "")
-  ui.espHide.BackgroundColor3 = hideOpt.on and C.on or C.card
   ui.espStream.Text = ("Muat semua plot tiap %ds: %s"):format(STREAM_EVERY, esp.stream and "ON" or "OFF")
   ui.espScan.Text = ">> Muat semua + scan ulang  [-]"
   ui.espStatus.Text = esp.status
@@ -1529,7 +1544,12 @@ local function render()
     tb.BackgroundColor3 = on and C.on or C.card
     pages[name].Visible = on
   end
-  afkBtn.Text = ("Anti-AFK: %s%s"):format(afk.on and "ON" or "OFF", afk.count > 0 and (" (dicegah %dx)"):format(afk.count) or "")
+  afkBtn.Text = ("Anti-AFK: %s%s"):format(afk.on and "ON" or "OFF", afk.count > 0 and (" (%d)"):format(afk.count) or "")
+  afkBtn.BackgroundColor3 = afk.on and C.on or C.card
+  lightBtn.Text = "Mode ringan: " .. (light.on and "ON" or "OFF")
+  lightBtn.BackgroundColor3 = light.on and C.on or C.card
+  hideBtn.Text = "Gedung: " .. (hideOpt.on and ("sembunyi (%d)"):format(hideOpt.count) or "tampil")
+  hideBtn.BackgroundColor3 = hideOpt.on and C.on or C.card
   RENDER[activeTab]()
 end
 
@@ -1609,6 +1629,7 @@ local function stop()
   for m in pairs(entries) do dropEntry(m) end
   hideOpt.on = false
   pcall(showAllBuildings)      -- gedung yang disembunyikan dikembalikan
+  if light.on then pcall(setLight, false) end   -- rendering 3D + FPS normal lagi
   pcall(function() holder:Destroy() end)
   pcall(function() gui:Destroy() end)
 end
