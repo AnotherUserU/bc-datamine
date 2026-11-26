@@ -14,11 +14,12 @@ for _, key in ipairs({ "BC_HUB", "BC_ESP_INT", "BC_CAPTURE", "BC_SHUFFLE" }) do
 end
 local GUI_PARENT = (gethui and gethui()) or game:GetService("CoreGui")
 local RUN_ID = ("%04x"):format(math.random(0, 0xffff))
+local K = {}                     -- konstanta (dikumpulkan: batas 200 local per fungsi di Luau)
 GUI_PARENT:SetAttribute("BCHubRun", RUN_ID)
 for _, a in ipairs({ "BCEspRun", "BCCaptureRun", "BCShuffleRun" }) do GUI_PARENT:SetAttribute(a, "hub") end
-local OLD_GUIS = { BCHub = true, BCEspInt = true, BCEspIntPanel = true, BCCapturePanel = true, BCShufflePanel = true }
+K.OLD_GUIS = { BCHub = true, BCEspInt = true, BCEspIntPanel = true, BCCapturePanel = true, BCShufflePanel = true }
 for _, old in ipairs(GUI_PARENT:GetChildren()) do
-  if OLD_GUIS[old.Name] then old:Destroy() end
+  if K.OLD_GUIS[old.Name] then old:Destroy() end
 end
 if not game:IsLoaded() then game.Loaded:Wait() end
 
@@ -53,7 +54,7 @@ end
 -- bchub/<tanggal_jam>_<server>_<kategori>.txt  + 6 baris terakhir per kategori untuk panel.
 local HUB_DIR = "bchub"
 local SESSION = os.date("%Y%m%d_%H%M%S") .. "_" .. tostring(game.JobId):sub(1, 8)
-local CATEGORY_FILE = { HUB = "hub", ESP = "esp", MIS = "rudal", CAP = "capture", SHUF = "shuffle" }
+K.CATEGORY_FILE = { HUB = "hub", ESP = "esp", MIS = "rudal", CAP = "capture", SHUF = "shuffle" }
 pcall(makefolder, HUB_DIR)
 local recent = { ESP = {}, MIS = {}, CAP = {}, SHUF = {}, HUB = {} }
 local logStarted = {}
@@ -72,7 +73,7 @@ local function log(tag, msg)
   local list = recent[tag]
   list[#list + 1] = stamp .. " " .. msg
   if #list > 6 then table.remove(list, 1) end
-  local file = ("%s/%s_%s.txt"):format(HUB_DIR, SESSION, CATEGORY_FILE[tag] or "hub")
+  local file = ("%s/%s_%s.txt"):format(HUB_DIR, SESSION, K.CATEGORY_FILE[tag] or "hub")
   local line = stamp .. " " .. msg .. "\n"
   pcall(function()
     if logStarted[file] and appendfile then appendfile(file, line) return end
@@ -86,13 +87,13 @@ local sendLog                  -- kirim log ke webhook Discord (didefinisikan di
 -- =====================================================================================================
 -- ESP
 -- =====================================================================================================
-local M_PER_STUD = 0.28
-local MAX_DIST_M = 1500
-local ESP_EVERY = 0.3
-local RESCAN_DEBOUNCE = 1
-local STREAM_EVERY = 90
-local LABEL_UP = 4
-local SUB_DIVE_Z = 1.5
+K.M_PER_STUD = 0.28
+K.MAX_DIST_M = 1500
+K.ESP_EVERY = 0.3
+K.RESCAN_DEBOUNCE = 1
+K.STREAM_EVERY = 90
+K.LABEL_UP = 4
+K.SUB_DIVE_Z = 1.5
 
 local TEMPLATE_KIND = {}
 local function addKind(kind, list) for _, t in ipairs(list) do TEMPLATE_KIND[t] = kind end end
@@ -132,7 +133,7 @@ local CATS = {
 }
 local CAT = {}
 for _, c in ipairs(CATS) do CAT[c.id] = c end
-local MINE_COLOR, DEAD_COLOR = Color3.fromRGB(80, 220, 80), Color3.fromRGB(150, 150, 150)
+K.MINE_COLOR, K.DEAD_COLOR = Color3.fromRGB(80, 220, 80), Color3.fromRGB(150, 150, 150)
 local esp = { mine = false, hideDead = true, stream = true, status = "Siap", scanning = false, dirty = true }
 local entries = {}            -- model -> entry
 local playerOn = {}           -- UserId -> false kalau dimatikan
@@ -161,7 +162,7 @@ local function makeLabel(e)
   local bb = Instance.new("BillboardGui")
   bb.AlwaysOnTop, bb.LightInfluence, bb.ResetOnSpawn = true, 0, false
   bb.Size = UDim2.fromOffset(260, 16)
-  bb.MaxDistance = MAX_DIST_M / M_PER_STUD
+  bb.MaxDistance = K.MAX_DIST_M / K.M_PER_STUD
   local t = Instance.new("TextLabel")
   t.BackgroundTransparency, t.Size = 1, UDim2.fromScale(1, 1)
   t.Font, t.TextSize, t.TextStrokeTransparency = Enum.Font.GothamBold, 13, 0
@@ -171,7 +172,7 @@ local function makeLabel(e)
     bb.StudsOffsetWorldSpace = Vector3.new(0, 12, 0)
   else
     local a = Instance.new("Attachment")
-    a.WorldPosition = e.point + Vector3.new(0, LABEL_UP, 0)
+    a.WorldPosition = e.point + Vector3.new(0, K.LABEL_UP, 0)
     a.Parent = workspace.Terrain
     e.att = a
     bb.Adornee = a
@@ -244,7 +245,7 @@ local function isDead(e)
 end
 local function submerged(e)
   local mo = attr(e.model, "ShipMotion")
-  return typeof(mo) == "Vector3" and mo.Z > SUB_DIVE_Z
+  return typeof(mo) == "Vector3" and mo.Z > K.SUB_DIVE_Z
 end
 local function posOf(e)
   if e.ship then
@@ -286,9 +287,9 @@ local function updateLabels()
     local show = wanted(e, dead)
     if show then
       local p = posOf(e)
-      local dist = p and math.floor((p - cam).Magnitude * M_PER_STUD + 0.5) or 0
+      local dist = p and math.floor((p - cam).Magnitude * K.M_PER_STUD + 0.5) or 0
       e.txt.Text = ("%s%s [%s]%s %dm"):format(dead and "[DEAD] " or "", e.name, playerName(e.owner), extraInfo(e), dist)
-      e.txt.TextColor3 = dead and DEAD_COLOR or (isMine(e) and MINE_COLOR or CAT[e.kind].color)
+      e.txt.TextColor3 = dead and K.DEAD_COLOR or (isMine(e) and K.MINE_COLOR or CAT[e.kind].color)
     end
     if e.bb.Enabled ~= show then e.bb.Enabled = show end
   end
@@ -340,19 +341,19 @@ watchFolder("Ships")
 -- ===== Sembunyikan gedung (HANYA di layar sendiri) selain air defense & peluncur rudal, supaya lebih ringan =====
 -- Part/decal dibuat transparan lewat LocalTransparencyModifier (tidak digambar), partikel/lampu/GUI gedung dimatikan.
 -- Tidak mengubah apa pun di server. Dimatikan / script berhenti = semua dikembalikan seperti semula.
-local KEEP_KIND = { ad = true, rudal = true }
-local HIDE_BATCH = 25            -- model per frame saat menyembunyikan (supaya tidak patah-patah)
+K.KEEP_KIND = { ad = true, rudal = true }
+K.HIDE_BATCH = 25            -- model per frame saat menyembunyikan (supaya tidak patah-patah)
 local hideOpt = { on = false, count = 0, busy = false }
 local hiddenModels = {}          -- model -> { conn, saved = { [instance] = Enabled lama } }
-local TOGGLE_CLASSES = { "ParticleEmitter", "Beam", "Trail", "Light", "Fire", "Smoke", "Sparkles", "SurfaceGui", "BillboardGui" }
+K.TOGGLE_CLASSES = { "ParticleEmitter", "Beam", "Trail", "Light", "Fire", "Smoke", "Sparkles", "SurfaceGui", "BillboardGui" }
 
 local function keepVisible(m)
   local tmpl = attr(m, "RoadTemplateName") or (m.Name:sub(1, 6) == "Placed" and m.Name:sub(7)) or m.Name
-  return KEEP_KIND[TEMPLATE_KIND[tmpl]] == true
+  return K.KEEP_KIND[TEMPLATE_KIND[tmpl]] == true
 end
 local function hideInstance(rec, d)
   if d:IsA("BasePart") or d:IsA("Decal") then d.LocalTransparencyModifier = 1 return end
-  for _, cls in ipairs(TOGGLE_CLASSES) do
+  for _, cls in ipairs(K.TOGGLE_CLASSES) do
     if d:IsA(cls) then
       if rec.saved[d] == nil then rec.saved[d] = d.Enabled end
       d.Enabled = false
@@ -391,7 +392,7 @@ local function applyHide()
     for i, m in ipairs(placed and placed:GetChildren() or {}) do
       if not hideOpt.on or not alive then break end
       pcall(hideModel, m)
-      if i % HIDE_BATCH == 0 then task.wait() end
+      if i % K.HIDE_BATCH == 0 then task.wait() end
     end
     if not hideOpt.on then showAllBuildings() end
     hideOpt.busy = false
@@ -454,9 +455,9 @@ local function findAssign()
   return nil
 end
 
-local STOP_WORDS = { "limit reached", "No more", "Select a munition" }
+K.STOP_WORDS = { "limit reached", "No more", "Select a munition" }
 local function isStop(msg)
-  for _, w in ipairs(STOP_WORDS) do if tostring(msg):find(w, 1, true) then return true end end
+  for _, w in ipairs(K.STOP_WORDS) do if tostring(msg):find(w, 1, true) then return true end end
   return false
 end
 
@@ -518,19 +519,19 @@ end
 -- =====================================================================================================
 -- AUTO CAPTURE (unit darat ke zona tengah, jalan bertahap + memutar kalau blocked)
 -- =====================================================================================================
-local TICK = 3
-local LEG, LEG_MIN = 400, 40
-local STILL_STUD = 3
-local REORDER_MIN = 3
-local DETOURS = { 0, 45, -45, 90, -90 }
-local STUCK_ORDERS, STUCK_GAIN = 2, 10
-local MAX_FAILS = 6
-local BAN_SECONDS = 300
-local EDGE_INSET = 0.75
-local RETRY_TURN = 0.9
-local TICK_TIMEOUT = 20
-local DEBUG_UNITS = 8
-local PRIORITY = { "URANIUM MINE", "CITY", "INDUSTRIAL ZONE", "NUCLEAR POWER PLANT", "OIL FIELD", "MINING SITE", "AIRPORT" }
+K.TICK = 3
+K.LEG, K.LEG_MIN = 400, 40
+K.STILL_STUD = 3
+K.REORDER_MIN = 3
+K.DETOURS = { 0, 45, -45, 90, -90 }
+K.STUCK_ORDERS, K.STUCK_GAIN = 2, 10
+K.MAX_FAILS = 6
+K.BAN_SECONDS = 300
+K.EDGE_INSET = 0.75
+K.RETRY_TURN = 0.9
+K.TICK_TIMEOUT = 20
+K.DEBUG_UNITS = 8
+K.PRIORITY = { "URANIUM MINE", "CITY", "INDUSTRIAL ZONE", "NUCLEAR POWER PLANT", "OIL FIELD", "MINING SITE", "AIRPORT" }
 
 local cap = { on = false, garrison = true, perZone = 3, status = "OFF", lastResult = "", tickN = 0,
               lastTickAt = os.clock(), phase = "-", unitDebug = "", debug = true }
@@ -564,8 +565,8 @@ local function inside(z, p)
 end
 local function rank(z)
   local title = zoneTitle(z)
-  for i, t in ipairs(PRIORITY) do if t == title then return i end end
-  return #PRIORITY + 1
+  for i, t in ipairs(K.PRIORITY) do if t == title then return i end end
+  return #K.PRIORITY + 1
 end
 local function zones()
   local list = {}
@@ -615,31 +616,31 @@ local function angleFrom(z, p)
 end
 local function edgePoint(a)
   local z = a.zone
-  return z.CFrame:PointToWorldSpace(Vector3.new(math.cos(a.angle) * z.Size.X / 2 * EDGE_INSET, 0,
-    math.sin(a.angle) * z.Size.Z / 2 * EDGE_INSET))
+  return z.CFrame:PointToWorldSpace(Vector3.new(math.cos(a.angle) * z.Size.X / 2 * K.EDGE_INSET, 0,
+    math.sin(a.angle) * z.Size.Z / 2 * K.EDGE_INSET))
 end
 local function nextStep(a, pos)
   local goal = edgePoint(a)
   local flat = Vector3.new(goal.X - pos.X, 0, goal.Z - pos.Z)
   local d = flat.Magnitude
-  local turn = DETOURS[a.detour or 1]
+  local turn = K.DETOURS[a.detour or 1]
   if turn == 0 then return ground(d > a.leg and (pos + flat.Unit * a.leg) or goal, a.zone) end
   local dir = CFrame.Angles(0, math.rad(turn), 0) * flat.Unit
   return ground(pos + dir * math.min(a.leg, d), a.zone)
 end
 local function nextDetour(a)
-  a.detour = (a.detour or 1) % #DETOURS + 1
+  a.detour = (a.detour or 1) % #K.DETOURS + 1
   if a.detour == 1 then
-    a.angle = a.angle + RETRY_TURN
+    a.angle = a.angle + K.RETRY_TURN
     return "semua arah dicoba, pindah ke sisi lain zona"
   end
-  return ("belok %+d derajat"):format(DETOURS[a.detour])
+  return ("belok %+d derajat"):format(K.DETOURS[a.detour])
 end
 
-local FAIL_WORDS = { "block", "fail", "reject", "invalid", "cancel", "unreach" }
+K.FAIL_WORDS = { "block", "fail", "reject", "invalid", "cancel", "unreach" }
 local function isFail(st)
   st = st:lower()
-  for _, w in ipairs(FAIL_WORDS) do if st:find(w, 1, true) then return true end end
+  for _, w in ipairs(K.FAIL_WORDS) do if st:find(w, 1, true) then return true end end
   return false
 end
 
@@ -657,11 +658,11 @@ local function onOrderStatus(p)
       if isFail(st) then
         a.fails = (a.fails or 0) + 1
         local how = nextDetour(a)
-        a.leg = math.max(LEG_MIN, math.floor(a.leg / 2))
+        a.leg = math.max(K.LEG_MIN, math.floor(a.leg / 2))
         a.orderedAt = 0
-        log("CAP", ("SERVER %s: %s -> gagal %d/%d, %s, langkah %d"):format(unitName(r.unit), a.result, a.fails, MAX_FAILS, how, a.leg))
+        log("CAP", ("SERVER %s: %s -> gagal %d/%d, %s, langkah %d"):format(unitName(r.unit), a.result, a.fails, K.MAX_FAILS, how, a.leg))
       else
-        a.leg = math.min(LEG, a.leg * 2)
+        a.leg = math.min(K.LEG, a.leg * 2)
         if (a.detour or 1) ~= 1 then a.detourDone = true end
         if st:lower():find("arriv", 1, true) then a.orderedAt = 0 end
       end
@@ -687,9 +688,9 @@ local function releaseStale(byUnit)
     elseif not a.zone.Parent then release(u, "zona hilang (tidak ter-stream)")
     elseif zoneOn[a.zone] == false then release(u, "zona dimatikan")
     elseif not cap.garrison and zoneMine(a.zone) then release(u, "zona sudah direbut")
-    elseif (a.fails or 0) >= MAX_FAILS then
+    elseif (a.fails or 0) >= K.MAX_FAILS then
       banned[u] = banned[u] or {}
-      banned[u][a.zone] = os.clock() + BAN_SECONDS
+      banned[u][a.zone] = os.clock() + K.BAN_SECONDS
       release(u, ("gagal %dx ke %s, diganti unit lain"):format(a.fails, (zoneTitle(a.zone))))
     end
   end
@@ -712,7 +713,7 @@ local function assignUnits(units)
         if not best then break end
         local e = table.remove(pool, best)
         count[z] = (count[z] or 0) + 1
-        assign[e.unit] = { zone = z, orderedAt = 0, leg = LEG, state = "baru", result = "-", fails = 0, detour = 1,
+        assign[e.unit] = { zone = z, orderedAt = 0, leg = K.LEG, state = "baru", result = "-", fails = 0, detour = 1,
           angle = angleFrom(z, e.pos) + (count[z] - 1) * 0.5 }
         log("CAP", ("TUGAS %s -> %s (%d stud)"):format(unitName(e.unit), (zoneTitle(z)), math.floor(bd)))
         need = need - 1
@@ -725,7 +726,7 @@ local function planOrders(byUnit)
   local now, orders = os.clock(), {}
   for u, a in pairs(assign) do
     local e = byUnit[u]
-    local moving = a.lastPos and (e.pos - a.lastPos).Magnitude > STILL_STUD
+    local moving = a.lastPos and (e.pos - a.lastPos).Magnitude > K.STILL_STUD
     a.lastPos = e.pos
     a.dist = math.floor(Vector3.new(a.zone.Position.X - e.pos.X, 0, a.zone.Position.Z - e.pos.Z).Magnitude)
     if inside(a.zone, e.pos) then
@@ -733,20 +734,20 @@ local function planOrders(byUnit)
       a.state = "SAMPAI"
     elseif moving then
       a.state = "jalan"
-    elseif now - a.orderedAt >= REORDER_MIN then
-      if a.bestDist and a.dist >= a.bestDist - STUCK_GAIN then a.stuck = (a.stuck or 0) + 1
+    elseif now - a.orderedAt >= K.REORDER_MIN then
+      if a.bestDist and a.dist >= a.bestDist - K.STUCK_GAIN then a.stuck = (a.stuck or 0) + 1
       else a.stuck, a.bestDist = 0, a.dist end
-      if a.stuck >= STUCK_ORDERS then
+      if a.stuck >= K.STUCK_ORDERS then
         a.stuck, a.bestDist, a.detourDone = 0, nil, false
         a.fails = (a.fails or 0) + 1
-        log("CAP", ("MACET %s sisa %d, gagal %d/%d, %s"):format(unitName(u), a.dist, a.fails, MAX_FAILS, nextDetour(a)))
+        log("CAP", ("MACET %s sisa %d, gagal %d/%d, %s"):format(unitName(u), a.dist, a.fails, K.MAX_FAILS, nextDetour(a)))
       elseif a.detourDone then
         a.detour, a.detourDone = 1, false
       end
       orders[#orders + 1] = { unit = u, position = nextStep(a, e.pos) }
       a.orderedAt, a.state = now, "diperintah"
     else
-      a.state = ("diam, tunggu %ds"):format(math.ceil(REORDER_MIN - (now - a.orderedAt)))
+      a.state = ("diam, tunggu %ds"):format(math.ceil(K.REORDER_MIN - (now - a.orderedAt)))
     end
   end
   return orders
@@ -776,10 +777,10 @@ local function evaluate()
   local lines, n = {}, 0
   for u, a in pairs(assign) do
     n = n + 1
-    if #lines < DEBUG_UNITS then
+    if #lines < K.DEBUG_UNITS then
       lines[#lines + 1] = unitName(u):sub(1, 14) .. " > " .. tostring((zoneTitle(a.zone))):sub(1, 10) .. " | "
         .. tostring(a.state) .. " | sisa " .. tostring(a.dist) .. " | step " .. tostring(a.leg)
-        .. ((a.detour or 1) ~= 1 and (" belok " .. DETOURS[a.detour]) or "") .. " | gagal " .. tostring(a.fails or 0)
+        .. ((a.detour or 1) ~= 1 and (" belok " .. K.DETOURS[a.detour]) or "") .. " | gagal " .. tostring(a.fails or 0)
     end
   end
   cap.unitDebug = table.concat(lines, "\n")
@@ -795,9 +796,9 @@ end
 local SHUFFLE_COST = tonumber(Politics.ShuffleCost) or 25
 local STATE_ATTR = Politics.StateAttribute or "PoliticsState"
 local READY_ATTR = Politics.ReadyAttribute or "CityHallReady"
-local SHUFFLE_GAP = 1.5
-local STATE_WAIT = 5
-local HISTORY_MAX = 30
+K.SHUFFLE_GAP = 1.5
+K.STATE_WAIT = 5
+K.HISTORY_MAX = 30
 local ShuffleRemote = RS:WaitForChild(Politics.RemoteFolderName or "PoliticsRemotes"):WaitForChild("Shuffle")
 local STATS_FILE = "bc_shuffle_stats_" .. lp.UserId .. ".json"
 
@@ -840,7 +841,7 @@ local function rareIndex(pool)
 end
 local function addHistory(text)
   table.insert(shuf.history, 1, os.date("%d/%m %H:%M") .. " " .. text)
-  while #shuf.history > HISTORY_MAX do table.remove(shuf.history) end
+  while #shuf.history > K.HISTORY_MAX do table.remove(shuf.history) end
 end
 
 local function onFound(pool, i)
@@ -867,7 +868,7 @@ local function shuffleOnce()
   end
   shuf.count, shuf.spent, shuf.err = shuf.count + 1, shuf.spent + SHUFFLE_COST, ""
   local t0 = os.clock()
-  while lp:GetAttribute(STATE_ATTR) == before and os.clock() - t0 < STATE_WAIT do task.wait(0.1) end
+  while lp:GetAttribute(STATE_ATTR) == before and os.clock() - t0 < K.STATE_WAIT do task.wait(0.1) end
   local s = readPolitics()
   shuf.pp, shuf.pool = s.pp, poolText(s.pool)
   addHistory(("#%d %s"):format(shuf.count, shuf.pool))
@@ -892,7 +893,7 @@ local function shuffleStep()
   end
   shuf.status = "Shuffle..."
   shuffleOnce()
-  return SHUFFLE_GAP
+  return K.SHUFFLE_GAP
 end
 
 -- =====================================================================================================
@@ -915,9 +916,10 @@ end)
 -- LOG PERANG (dulu combatlog.lua): hanya MENDENGAR event server soal rudal/interceptor + atribut air defense.
 -- Satu file per sesi: bccombat/<waktu>_<server>.txt, ditambah tiap 5 dtk. Event handler tidak menyentuh GUI.
 -- =====================================================================================================
-local COMBAT_DIR, COMBAT_FLUSH, COMBAT_DEPTH = "bccombat", 5, 4
-local COMBAT_WORDS = { "patriot", "missile", "radar", "intercept", "combat", "ciws", "defen", "launch", "naval", "ship", "torpedo" }
-local COMBAT_ATTRS = { "PatriotAmmo", "PatriotMagazine", "PatriotReadyAt", "PatriotResupplying", "PatriotEnabled", "Operational" }
+local COMBAT_DIR = "bccombat"
+K.COMBAT_FLUSH, K.COMBAT_DEPTH = 5, 4
+K.COMBAT_WORDS = { "patriot", "missile", "radar", "intercept", "combat", "ciws", "defen", "launch", "naval", "ship", "torpedo" }
+K.COMBAT_ATTRS = { "PatriotAmmo", "PatriotMagazine", "PatriotReadyAt", "PatriotResupplying", "PatriotEnabled", "Operational" }
 local combat = { on = true, file = nil, events = 0, watched = 0, remotes = 0, lines = {}, written = false }
 local combatWatched = {}
 
@@ -925,7 +927,7 @@ local function cfmt(v, depth)
   depth = depth or 0
   local t = typeof(v)
   if t == "table" then
-    if depth >= COMBAT_DEPTH then return "{...}" end
+    if depth >= K.COMBAT_DEPTH then return "{...}" end
     local parts = {}
     for k, x in pairs(v) do parts[#parts + 1] = tostring(k) .. "=" .. cfmt(x, depth + 1) end
     table.sort(parts)
@@ -956,9 +958,9 @@ local function combatWatchBuilding(m)
   local tag = ("%s owner=%s at=(%.0f,%.0f)"):format(tostring(attr(m, "RoadTemplateName")),
     tostring(attr(m, "PlacementOwnerUserId")), p.X, p.Z)
   local snap = {}
-  for _, a in ipairs(COMBAT_ATTRS) do snap[#snap + 1] = a .. "=" .. cfmt(attr(m, a)) end
+  for _, a in ipairs(K.COMBAT_ATTRS) do snap[#snap + 1] = a .. "=" .. cfmt(attr(m, a)) end
   cline("ADSNAP " .. tag .. " | " .. table.concat(snap, ", "))
-  for _, a in ipairs(COMBAT_ATTRS) do
+  for _, a in ipairs(K.COMBAT_ATTRS) do
     connect(m:GetAttributeChangedSignal(a), function() cline(("ADATTR %s | %s=%s"):format(tag, a, cfmt(attr(m, a)))) end)
   end
 end
@@ -979,7 +981,7 @@ local function combatStart()
   local found = {}
   for _, f in ipairs(RS:GetChildren()) do
     local low = f.Name:lower()
-    for _, w in ipairs(COMBAT_WORDS) do
+    for _, w in ipairs(K.COMBAT_WORDS) do
       if low:find(w, 1, true) then
         for _, r in ipairs(f:GetDescendants()) do
           if r:IsA("RemoteEvent") then
@@ -1010,14 +1012,14 @@ end
 -- =====================================================================================================
 -- WEBHOOK: kirim bc_hub_log.txt (+ ringkasan) ke webhook Discord milikmu. URL disimpan lokal di workspace.
 -- =====================================================================================================
-local WEBHOOK_FILE = "bc_hub_webhook.txt"
+K.WEBHOOK_FILE = "bc_hub_webhook.txt"
 local httpRequest = (syn and syn.request) or http_request or request or (http and http.request)
 local hook = { url = "", every = 0, lastSent = os.clock(), status = "Belum diatur", busy = false }
-local AUTOSEND_FILE = "bc_hub_autosend.txt"   -- menit kirim otomatis, disimpan supaya autoexec tidak reset
+K.AUTOSEND_FILE = "bc_hub_autosend.txt"   -- menit kirim otomatis, disimpan supaya autoexec tidak reset
 pcall(function()
-  if isfile and isfile(WEBHOOK_FILE) then hook.url = readfile(WEBHOOK_FILE):gsub("%s", "") end
-  if isfile and isfile(AUTOSEND_FILE) then
-    local n = tonumber((readfile(AUTOSEND_FILE):gsub("%s", "")))
+  if isfile and isfile(K.WEBHOOK_FILE) then hook.url = readfile(K.WEBHOOK_FILE):gsub("%s", "") end
+  if isfile and isfile(K.AUTOSEND_FILE) then
+    local n = tonumber((readfile(K.AUTOSEND_FILE):gsub("%s", "")))
     hook.every = (n and n > 0) and math.floor(n) * 60 or 0
   end
 end)
@@ -1028,7 +1030,7 @@ local function validWebhook(url)
 end
 -- Kunci: hub hanya jalan dengan URL webhook pemilik. Yang disimpan di script hanya hash-nya (FNV-1a 32 bit, dua arah),
 -- jadi repo publik tidak membocorkan URL. Ini kunci ringan: source tetap bisa dibaca/diubah orang.
-local KEY_HASH = "fbf0ad5c9bbc9cb0"
+K.KEY_HASH = "fbf0ad5c9bbc9cb0"
 local function mul32(a, b)
   return (a * (b % 65536) + ((a * math.floor(b / 65536)) % 65536) * 65536) % 4294967296
 end
@@ -1038,7 +1040,7 @@ local function fnv(s)
   return h
 end
 local function isKey(url)
-  return validWebhook(url) and ("%08x%08x"):format(fnv(url), fnv(url:reverse())) == KEY_HASH
+  return validWebhook(url) and ("%08x%08x"):format(fnv(url), fnv(url:reverse())) == K.KEY_HASH
 end
 local unlocked = isKey(hook.url)
 if hook.url ~= "" then hook.status = unlocked and "Siap" or "URL tersimpan bukan kunci yang benar" end
@@ -1050,21 +1052,21 @@ local function summary(note)
       combat.events, combat.watched)
 end
 
--- Yang sudah terkirim dicatat per file (berapa byte) di SENT_FILE, jadi yang dikirim hanya file baru atau bagian
+-- Yang sudah terkirim dicatat per file (berapa byte) di K.SENT_FILE, jadi yang dikirim hanya file baru atau bagian
 -- baru dari file yang masih bertambah. Catatan baru disimpan SETELAH Discord menerima pesannya.
-local SENT_FILE = "bc_hub_sent.json"
+K.SENT_FILE = "bc_hub_sent.json"
 local SEND_DIRS = { HUB_DIR, COMBAT_DIR }
-local MSG_MAX_BYTES = 8000000   -- batas lampiran webhook Discord ~10 MB per pesan
-local MSG_MAX_FILES = 9         -- batas Discord 10 lampiran per pesan
+K.MSG_MAX_BYTES = 8000000   -- batas lampiran webhook Discord ~10 MB per pesan
+K.MSG_MAX_FILES = 9         -- batas Discord 10 lampiran per pesan
 local sentBytes = {}            -- [file] = byte terkirim; sentBytes._done[file] = true -> file sesi lama, selesai
 pcall(function()
-  if isfile(SENT_FILE) then
-    local t = HttpService:JSONDecode(readfile(SENT_FILE))
+  if isfile(K.SENT_FILE) then
+    local t = HttpService:JSONDecode(readfile(K.SENT_FILE))
     if type(t) == "table" then sentBytes = t end
   end
 end)
 if type(sentBytes._done) ~= "table" then sentBytes._done = {} end
-local function saveSent() pcall(writefile, SENT_FILE, HttpService:JSONEncode(sentBytes)) end
+local function saveSent() pcall(writefile, K.SENT_FILE, HttpService:JSONEncode(sentBytes)) end
 -- file dari sesi lain tidak akan bertambah lagi: setelah terkirim penuh, tidak perlu dibaca ulang
 local function isOldSession(key) return not key:find(SESSION, 1, true) end
 
@@ -1086,7 +1088,7 @@ local function pendingChunks()
               sentBytes._done[key], changed = true, true
             end
             while from < #data do
-              local to = math.min(#data, from + MSG_MAX_BYTES)
+              local to = math.min(#data, from + K.MSG_MAX_BYTES)
               out[#out + 1] = { key = key, from = from, to = to, size = #data, data = data:sub(from + 1, to) }
               from = to
             end
@@ -1155,7 +1157,7 @@ local function postLog(note)
     task.wait(1.5)   -- jeda antar pesan (rate limit webhook)
   end
   for _, c in ipairs(chunks) do
-    if #batch >= MSG_MAX_FILES or (#batch > 0 and bytes + #c.data > MSG_MAX_BYTES) then flushBatch() end
+    if #batch >= K.MSG_MAX_FILES or (#batch > 0 and bytes + #c.data > K.MSG_MAX_BYTES) then flushBatch() end
     batch[#batch + 1] = c
     bytes = bytes + #c.data
   end
@@ -1234,13 +1236,13 @@ end
 -- Baris atas: 3 tombol umum (Anti-AFK | Mode ringan | Sembunyikan gedung)
 -- Mode ringan: dunia 3D tidak digambar + FPS dibatasi. Logika script tetap jalan; label ESP baru terlihat lagi
 -- setelah mode ringan dimatikan.
-local LIGHT_FPS, NORMAL_FPS = 10, 60
+K.LIGHT_FPS, K.NORMAL_FPS = 10, 60
 local light = { on = false }
 local RunService = game:GetService("RunService")
 local function setLight(on)
   light.on = on
   pcall(function() RunService:Set3dRenderingEnabled(not on) end)
-  if setfpscap then pcall(setfpscap, on and LIGHT_FPS or NORMAL_FPS) end
+  if setfpscap then pcall(setfpscap, on and K.LIGHT_FPS or K.NORMAL_FPS) end
   log("HUB", "mode ringan: " .. (on and "ON" or "OFF"))
 end
 local topW = (W - 20) / 3
@@ -1385,7 +1387,7 @@ do
   ui.shufErr = textLine(pg, C.red)
   textLine(pg, C.muted).Text = "Pool sekarang:"
   ui.shufPool = textLine(pg)
-  textLine(pg, C.muted).Text = ("Riwayat (terbaru di atas, %d terakhir, tersimpan di %s):"):format(HISTORY_MAX, STATS_FILE)
+  textLine(pg, C.muted).Text = ("Riwayat (terbaru di atas, %d terakhir, tersimpan di %s):"):format(K.HISTORY_MAX, STATS_FILE)
   ui.shufHist = textLine(pg, nil, Enum.Font.Code)
   button(pg, function()
     shuf.count, shuf.spent, shuf.fails, shuf.history = 0, 0, 0, {}
@@ -1404,7 +1406,7 @@ do
     if url == "" then return end
     if not isKey(url) then hook.status = "Bukan URL webhook kunci yang benar" return end
     hook.url, hook.status = url, "Tersimpan"
-    pcall(writefile, WEBHOOK_FILE, url)
+    pcall(writefile, K.WEBHOOK_FILE, url)
     box.Text = ""
   end)
   urlBox.TextTruncate = Enum.TextTruncate.AtEnd
@@ -1412,7 +1414,7 @@ do
     local n = numberOf(box)
     hook.every = (n and n > 0) and n * 60 or 0
     box.Text = hook.every > 0 and tostring(hook.every / 60) or ""
-    pcall(writefile, AUTOSEND_FILE, tostring(hook.every / 60))
+    pcall(writefile, K.AUTOSEND_FILE, tostring(hook.every / 60))
   end)
   everyBox.Text = hook.every > 0 and tostring(hook.every / 60) or ""
   ui.combatOn = button(pg, function() combat.on = not combat.on end)
@@ -1452,7 +1454,7 @@ local function renderESP()
       b.TextColor3 = playerOn[id] == false and C.muted or C.text
     end
   end
-  ui.espStream.Text = ("Muat semua plot tiap %ds: %s"):format(STREAM_EVERY, esp.stream and "ON" or "OFF")
+  ui.espStream.Text = ("Muat semua plot tiap %ds: %s"):format(K.STREAM_EVERY, esp.stream and "ON" or "OFF")
   ui.espScan.Text = ">> Muat semua + scan ulang  [-]"
   ui.espStatus.Text = esp.status
 end
@@ -1490,7 +1492,7 @@ local function renderCapture()
   local ago = os.clock() - cap.lastTickAt
   if not cap.on then
     ui.capBeat.Text, ui.capBeat.TextColor3 = "Loop: hidup (OFF)", C.muted
-  elseif ago <= TICK * 3 then
+  elseif ago <= K.TICK * 3 then
     ui.capBeat.Text, ui.capBeat.TextColor3 = ("Loop: JALAN tick #%d (%.0fs lalu)"):format(cap.tickN, ago), C.green
   else
     ui.capBeat.Text = ("Loop: MACET %.0fs, fase '%s'"):format(ago, cap.phase)
@@ -1612,7 +1614,7 @@ local function showWebhookPrompt()
     local url = field.Text:gsub("%s", "")
     if not isKey(url) then msg.Text = "Kunci salah. Minta URL webhook yang benar ke pemilik script." return end
     hook.url, hook.status = url, "Tersimpan"
-    pcall(writefile, WEBHOOK_FILE, url)
+    pcall(writefile, K.WEBHOOK_FILE, url)
     log("HUB", "kunci benar, hub dibuka")
     unlocked = true
     box:Destroy()
@@ -1644,22 +1646,22 @@ task.spawn(function()
   local lastScan, lastStream = 0, os.clock()
   while running() do
     local now = os.clock()
-    if esp.dirty and now - lastScan >= RESCAN_DEBOUNCE then
+    if esp.dirty and now - lastScan >= K.RESCAN_DEBOUNCE then
       esp.dirty, lastScan = false, now
       local ok, err = pcall(scan)
       if not ok then esp.status = "Scan ERR: " .. tostring(err) end
     end
-    if esp.stream and now - lastStream >= STREAM_EVERY and not esp.scanning then
+    if esp.stream and now - lastStream >= K.STREAM_EVERY and not esp.scanning then
       lastStream = now
       task.spawn(function() streamAll() esp.dirty = true end)
     end
     pcall(updateLabels)
-    task.wait(ESP_EVERY)
+    task.wait(K.ESP_EVERY)
   end
   stop()
 end)
 
--- ===== loop kerja capture (watchdog: tick yang macet > TICK_TIMEOUT dilewati) =====
+-- ===== loop kerja capture (watchdog: tick yang macet > K.TICK_TIMEOUT dilewati) =====
 task.spawn(function()
   waitUnlock()
   while running() do
@@ -1672,10 +1674,10 @@ task.spawn(function()
         done = true
       end)
       local t0 = os.clock()
-      while not done and os.clock() - t0 < TICK_TIMEOUT do task.wait(0.25) end
-      if not done then log("CAP", ("MACET di fase '%s' > %ds"):format(cap.phase, TICK_TIMEOUT)) end
+      while not done and os.clock() - t0 < K.TICK_TIMEOUT do task.wait(0.25) end
+      if not done then log("CAP", ("MACET di fase '%s' > %ds"):format(cap.phase, K.TICK_TIMEOUT)) end
     end
-    task.wait(TICK)
+    task.wait(K.TICK)
   end
 end)
 
@@ -1694,14 +1696,14 @@ task.spawn(function()
   end
 end)
 
--- ===== log perang: mulai setelah kunci dibuka, tulis ke file tiap COMBAT_FLUSH dtk =====
+-- ===== log perang: mulai setelah kunci dibuka, tulis ke file tiap K.COMBAT_FLUSH dtk =====
 task.spawn(function()
   waitUnlock()
   if not running() then return end
   local ok, err = pcall(combatStart)
   if not ok then log("HUB", "log perang gagal mulai: " .. tostring(err)) end
   while running() do
-    task.wait(COMBAT_FLUSH)
+    task.wait(K.COMBAT_FLUSH)
     combatFlush()
   end
   combatFlush()
