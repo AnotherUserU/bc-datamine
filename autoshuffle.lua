@@ -46,6 +46,21 @@ local function log(msg)
 end
 log("=== auto shuffle mulai ===")
 
+-- Statistik disimpan per akun di workspace executor, jadi jalan ulang / rejoin melanjutkan hitungan.
+local HttpService = game:GetService("HttpService")
+local STATS_FILE = "bc_shuffle_stats_" .. lp.UserId .. ".json"
+pcall(function()
+  if not (isfile and isfile(STATS_FILE)) then return end
+  local saved = HttpService:JSONDecode(readfile(STATS_FILE))
+  count = tonumber(saved.count) or 0
+  spent = tonumber(saved.spent) or 0
+  fails = tonumber(saved.fails) or 0
+  log(("lanjut dari simpanan: %d shuffle, %d PP"):format(count, spent))
+end)
+local function saveStats()
+  pcall(writefile, STATS_FILE, HttpService:JSONEncode({ count = count, spent = spent, fails = fails }))
+end
+
 local function current() return alive and GUI_PARENT:GetAttribute("BCShuffleRun") == RUN_ID end
 
 local function state() return Politics.Decode(lp:GetAttribute(Politics.StateAttribute)) end
@@ -86,12 +101,14 @@ local function shuffleOnce()
   end
   if res ~= true then
     fails = fails + 1
+    saveStats()
     lastResult = "ditolak: " .. tostring(msg or res)
     log("SHUFFLE ditolak: " .. tostring(msg or res))
     return
   end
   count = count + 1
   spent = spent + Politics.ShuffleCost
+  saveStats()
   local t0 = os.clock()
   while lp:GetAttribute(Politics.StateAttribute) == before and os.clock() - t0 < STATE_WAIT do task.wait(0.1) end
   local s = state()
