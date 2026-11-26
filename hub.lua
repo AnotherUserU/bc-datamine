@@ -49,18 +49,25 @@ local function playerName(id)
   return p and p.Name or tostring(id)
 end
 
--- ===== log: file bc_hub_log.txt + 6 baris terakhir per modul untuk panel =====
-local LOG_FILE = "bc_hub_log.txt"
+-- ===== log aktivitas: satu file per KATEGORI per SESI (rejoin = sesi baru, file lama tidak tertimpa) =====
+-- bchub/<tanggal_jam>_<server>_<kategori>.txt  + 6 baris terakhir per kategori untuk panel.
+local HUB_DIR = "bchub"
+local SESSION = os.date("%Y%m%d_%H%M%S") .. "_" .. tostring(game.JobId):sub(1, 8)
+local CATEGORY_FILE = { HUB = "hub", ESP = "esp", MIS = "rudal", CAP = "capture", SHUF = "shuffle" }
+pcall(makefolder, HUB_DIR)
 local recent = { ESP = {}, MIS = {}, CAP = {}, SHUF = {}, HUB = {} }
+local logStarted = {}
 local function log(tag, msg)
   local stamp = os.date("%H:%M:%S")
   local list = recent[tag]
   list[#list + 1] = stamp .. " " .. msg
   if #list > 6 then table.remove(list, 1) end
-  local line = stamp .. " [" .. RUN_ID .. "] " .. tag .. " " .. msg .. "\n"
+  local file = ("%s/%s_%s.txt"):format(HUB_DIR, SESSION, CATEGORY_FILE[tag] or "hub")
+  local line = stamp .. " " .. msg .. "\n"
   pcall(function()
-    local ok = appendfile and pcall(appendfile, LOG_FILE, line)
-    if not ok then writefile(LOG_FILE, line) end
+    if logStarted[file] and appendfile then appendfile(file, line) return end
+    writefile(file, line)
+    logStarted[file] = true
   end)
 end
 log("HUB", "=== BC Hub mulai ===")
@@ -879,7 +886,7 @@ end
 local function combatStart()
   if getgenv and getgenv().BC_COMBATLOG_STOP then pcall(getgenv().BC_COMBATLOG_STOP) end   -- combatlog.lua lama
   pcall(makefolder, COMBAT_DIR)
-  combat.file = ("%s/%s_%s.txt"):format(COMBAT_DIR, os.date("%Y%m%d_%H%M%S"), tostring(game.JobId):sub(1, 8))
+  combat.file = ("%s/%s.txt"):format(COMBAT_DIR, SESSION)
   combat.lines[#combat.lines + 1] = "-- mulai serverTime=" .. tostring(workspace:GetServerTimeNow())
   local found = {}
   for _, f in ipairs(RS:GetChildren()) do
@@ -916,8 +923,6 @@ end
 -- WEBHOOK: kirim bc_hub_log.txt (+ ringkasan) ke webhook Discord milikmu. URL disimpan lokal di workspace.
 -- =====================================================================================================
 local WEBHOOK_FILE = "bc_hub_webhook.txt"
-local LOG_SEND_MAX = 1000000   -- byte; hanya bagian akhir log yang dikirim kalau lebih besar
-local COMBAT_SEND_MAX = 7000000  -- byte; log perang (batas lampiran webhook Discord ~10 MB per pesan)
 local httpRequest = (syn and syn.request) or http_request or request or (http and http.request)
 local hook = { url = "", every = 0, lastSent = os.clock(), status = "Belum diatur", busy = false }
 local AUTOSEND_FILE = "bc_hub_autosend.txt"   -- menit kirim otomatis, disimpan supaya autoexec tidak reset
@@ -957,49 +962,114 @@ local function summary(note)
       combat.events, combat.watched)
 end
 
-local function postLog(note)
-  if not httpRequest then error("executor tidak punya fungsi request") end
-  if not validWebhook(hook.url) then error("URL webhook belum diisi / tidak valid") end
-  local content = ""
-  pcall(function() if isfile(LOG_FILE) then content = readfile(LOG_FILE) end end)
-  if #content > LOG_SEND_MAX then content = "...(dipotong)\n" .. content:sub(-LOG_SEND_MAX) end
-  if content == "" then content = "(log kosong)" end
+-- Yang sudah terkirim dicatat per file (berapa byte) di SENT_FILE, jadi yang dikirim hanya file baru atau bagian
+-- baru dari file yang masih bertambah. Catatan baru disimpan SETELAH Discord menerima pesannya.
+local SENT_FILE = "bc_hub_sent.json"
+local SEND_DIRS = { HUB_DIR, COMBAT_DIR }
+local MSG_MAX_BYTES = 8000000   -- batas lampiran webhook Discord ~10 MB per pesan
+local MSG_MAX_FILES = 9         -- batas Discord 10 lampiran per pesan
+local sentBytes = {}
+pcall(function()
+  if isfile(SENT_FILE) then
+    local t = HttpService:JSONDecode(readfile(SENT_FILE))
+    if type(t) == "table" then sentBytes = t end
+  end
+end)
+local function saveSent() pcall(writefile, SENT_FILE, HttpService:JSONEncode(sentBytes)) end
+
+-- potongan yang belum terkirim: { key, from, to, data }, file terlama dulu
+local function pendingChunks()
   combatFlush()
-  local war = ""
-  pcall(function() if combat.file and isfile(combat.file) then war = readfile(combat.file) end end)
-  if #war > COMBAT_SEND_MAX then war = "...(dipotong)\n" .. war:sub(-COMBAT_SEND_MAX) end
+  local out = {}
+  for _, dir in ipairs(SEND_DIRS) do
+    local ok, files = pcall(listfiles, dir)
+    if ok and type(files) == "table" then
+      table.sort(files)
+      for _, path in ipairs(files) do
+        local key = tostring(path):gsub("\\", "/")
+        local okR, data = pcall(readfile, path)
+        if key:sub(-4) == ".txt" and okR and type(data) == "string" then
+          local from = math.min(tonumber(sentBytes[key]) or 0, #data)
+          while from < #data do
+            local to = math.min(#data, from + MSG_MAX_BYTES)
+            out[#out + 1] = { key = key, from = from, to = to, data = data:sub(from + 1, to) }
+            from = to
+          end
+        end
+      end
+    end
+  end
+  return out
+end
+
+local function attachName(c)
+  local base = c.key:match("[^/]+$") or "log.txt"
+  if c.key:find(COMBAT_DIR .. "/", 1, true) then base = "perang_" .. base end
+  if c.from > 0 then base = base:gsub("%.txt$", "_lanjutan.txt") end
+  return (base:gsub("[^%w_%.%-]", "_"))
+end
+
+local function post(content, files)
   local boundary = "----BCHub" .. RUN_ID .. math.random(100000, 999999)
-  local payload = HttpService:JSONEncode({ content = summary(note):sub(1, 1900) })
-  local parts = {
-    "--" .. boundary,
-    'Content-Disposition: form-data; name="payload_json"',
-    "Content-Type: application/json", "", payload,
-    "--" .. boundary,
-    'Content-Disposition: form-data; name="files[0]"; filename="bc_hub_log.txt"',
-    "Content-Type: text/plain", "", content,
-  }
-  if war ~= "" then
-    local name = (combat.file:match("[^/]+$") or "bc_combatlog.txt")
-    for _, p in ipairs({ "--" .. boundary, ('Content-Disposition: form-data; name="files[1]"; filename="perang_%s"'):format(name),
-      "Content-Type: text/plain", "", war }) do parts[#parts + 1] = p end
+  local parts = { "--" .. boundary, 'Content-Disposition: form-data; name="payload_json"',
+    "Content-Type: application/json", "", HttpService:JSONEncode({ content = content:sub(1, 1900) }) }
+  for i, f in ipairs(files) do
+    for _, p in ipairs({ "--" .. boundary,
+      ('Content-Disposition: form-data; name="files[%d]"; filename="%s"'):format(i - 1, f.name),
+      "Content-Type: text/plain", "", f.data }) do parts[#parts + 1] = p end
   end
   parts[#parts + 1] = "--" .. boundary .. "--"
   parts[#parts + 1] = ""
-  local body = table.concat(parts, "\r\n")
-  local res = httpRequest({ Url = hook.url, Method = "POST", Body = body,
+  local res = httpRequest({ Url = hook.url, Method = "POST", Body = table.concat(parts, "\r\n"),
     Headers = { ["Content-Type"] = "multipart/form-data; boundary=" .. boundary } })
-  local code = res and (res.StatusCode or res.Status) or 0
-  if tonumber(code) == nil or tonumber(code) >= 300 then
+  local code = tonumber(res and (res.StatusCode or res.Status))
+  if not code or code >= 300 then
     error(("Discord menolak (%s): %s"):format(tostring(code), tostring(res and res.Body or "")):sub(1, 200))
   end
+end
+
+-- return: jumlah potongan file yang terkirim
+local function postLog(note)
+  if not httpRequest then error("executor tidak punya fungsi request") end
+  if not validWebhook(hook.url) then error("URL webhook belum diisi / tidak valid") end
+  local chunks = pendingChunks()
+  if #chunks == 0 then
+    post(summary(note) .. "\n(tidak ada log baru)", {})
+    return 0
+  end
+  local batch, bytes, sentN, msgN = {}, 0, 0, 0
+  local function flushBatch()
+    if #batch == 0 then return end
+    msgN = msgN + 1
+    local files, names = {}, {}
+    for _, c in ipairs(batch) do
+      files[#files + 1] = { name = attachName(c), data = c.data }
+      names[#names + 1] = files[#files].name
+    end
+    post((msgN == 1 and summary(note) or "(lanjutan)") .. "\nFile: " .. table.concat(names, ", "), files)
+    for _, c in ipairs(batch) do sentBytes[c.key] = c.to end
+    saveSent()
+    sentN = sentN + #batch
+    batch, bytes = {}, 0
+    task.wait(1.5)   -- jeda antar pesan (rate limit webhook)
+  end
+  for _, c in ipairs(chunks) do
+    if #batch >= MSG_MAX_FILES or (#batch > 0 and bytes + #c.data > MSG_MAX_BYTES) then flushBatch() end
+    batch[#batch + 1] = c
+    bytes = bytes + #c.data
+  end
+  flushBatch()
+  return sentN
 end
 
 sendLog = function(note)
   if hook.busy then return end
   hook.busy, hook.status = true, "Mengirim..."
   task.spawn(function()
-    local ok, err = pcall(postLog, note)
-    hook.status = ok and ("Terkirim " .. os.date("%H:%M:%S")) or ("Gagal: " .. tostring(err))
+    local ok, res = pcall(postLog, note)
+    local err = res
+    hook.status = ok and (res > 0 and ("Terkirim %d file baru, %s"):format(res, os.date("%H:%M:%S"))
+      or ("Tidak ada log baru, " .. os.date("%H:%M:%S"))) or ("Gagal: " .. tostring(err))
     if not ok then log("HUB", "webhook " .. hook.status) end
     hook.lastSent, hook.busy = os.clock(), false
   end)
@@ -1207,8 +1277,8 @@ end
 -- ----- tab LOG -----
 do
   local pg = pages.LOG
-  textLine(pg, C.muted).Text = "Semua fitur menulis ke satu file: " .. LOG_FILE .. " (workspace Delta). Log bisa dikirim "
-    .. "sebagai file .txt ke webhook Discord milikmu. Webhook = rahasia, jangan dibagikan."
+  textLine(pg, C.muted).Text = "Log aktivitas: folder " .. HUB_DIR .. "/ (1 file per kategori per sesi). Log perang: folder "
+    .. COMBAT_DIR .. "/ (1 file per sesi). Rejoin = file baru. Kirim hanya mengirim file / bagian yang belum terkirim."
   local urlBox = input(pg, "URL webhook", "https://discord.com/api/webhooks/...", function(box)
     local url = box.Text:gsub("%s", "")
     if url == "" then return end
@@ -1306,7 +1376,7 @@ local function renderCapture()
     ui.capBeat.Text = ("Loop: MACET %.0fs, fase '%s'"):format(ago, cap.phase)
     ui.capBeat.TextColor3 = C.red
   end
-  ui.capDbgBtn.Text = "Debug: " .. (cap.debug and "ON" or "OFF") .. "  (log: " .. LOG_FILE .. ")"
+  ui.capDbgBtn.Text = "Debug: " .. (cap.debug and "ON" or "OFF") .. "  (log: " .. HUB_DIR .. "/..._capture.txt)"
   ui.capDbg.Visible = cap.debug
   if cap.debug then
     local lines = { cap.unitDebug ~= "" and cap.unitDebug or "(belum ada unit ditugaskan)", "-- log --" }
