@@ -337,6 +337,84 @@ end
 watchFolder("PlacedRoads")
 watchFolder("Ships")
 
+-- ===== Sembunyikan gedung (HANYA di layar sendiri) selain air defense & peluncur rudal, supaya lebih ringan =====
+-- Part/decal dibuat transparan lewat LocalTransparencyModifier (tidak digambar), partikel/lampu/GUI gedung dimatikan.
+-- Tidak mengubah apa pun di server. Dimatikan / script berhenti = semua dikembalikan seperti semula.
+local KEEP_KIND = { ad = true, rudal = true }
+local HIDE_BATCH = 25            -- model per frame saat menyembunyikan (supaya tidak patah-patah)
+local hideOpt = { on = false, count = 0, busy = false }
+local hiddenModels = {}          -- model -> { conn, saved = { [instance] = Enabled lama } }
+local TOGGLE_CLASSES = { "ParticleEmitter", "Beam", "Trail", "Light", "Fire", "Smoke", "Sparkles", "SurfaceGui", "BillboardGui" }
+
+local function keepVisible(m)
+  local tmpl = attr(m, "RoadTemplateName") or (m.Name:sub(1, 6) == "Placed" and m.Name:sub(7)) or m.Name
+  return KEEP_KIND[TEMPLATE_KIND[tmpl]] == true
+end
+local function hideInstance(rec, d)
+  if d:IsA("BasePart") or d:IsA("Decal") then d.LocalTransparencyModifier = 1 return end
+  for _, cls in ipairs(TOGGLE_CLASSES) do
+    if d:IsA(cls) then
+      if rec.saved[d] == nil then rec.saved[d] = d.Enabled end
+      d.Enabled = false
+      return
+    end
+  end
+end
+local function hideModel(m)
+  if hiddenModels[m] or keepVisible(m) then return end
+  local rec = { saved = {} }
+  hiddenModels[m] = rec
+  hideOpt.count = hideOpt.count + 1
+  for _, d in ipairs(m:GetDescendants()) do pcall(hideInstance, rec, d) end
+  rec.conn = m.DescendantAdded:Connect(function(d) pcall(hideInstance, rec, d) end)
+end
+local function showModel(m)
+  local rec = hiddenModels[m]
+  if not rec then return end
+  hiddenModels[m] = nil
+  hideOpt.count = hideOpt.count - 1
+  pcall(function() rec.conn:Disconnect() end)
+  if not m.Parent then return end
+  for _, d in ipairs(m:GetDescendants()) do
+    if d:IsA("BasePart") or d:IsA("Decal") then pcall(function() d.LocalTransparencyModifier = 0 end) end
+  end
+  for d, was in pairs(rec.saved) do pcall(function() d.Enabled = was end) end
+end
+local function showAllBuildings()
+  for m in pairs(hiddenModels) do showModel(m) end
+end
+local function applyHide()
+  if hideOpt.busy then return end
+  hideOpt.busy = true
+  task.spawn(function()
+    local placed = workspace:FindFirstChild("PlacedRoads")
+    for i, m in ipairs(placed and placed:GetChildren() or {}) do
+      if not hideOpt.on or not alive then break end
+      pcall(hideModel, m)
+      if i % HIDE_BATCH == 0 then task.wait() end
+    end
+    if not hideOpt.on then showAllBuildings() end
+    hideOpt.busy = false
+  end)
+end
+local function setHide(on)
+  hideOpt.on = on
+  log("ESP", "sembunyikan gedung: " .. (on and "ON" or "OFF"))
+  if on then applyHide() else task.spawn(showAllBuildings) end
+end
+task.spawn(function()
+  local placed = workspace:WaitForChild("PlacedRoads", 30)
+  if not placed or not alive then return end
+  connect(placed.ChildAdded, function(m)
+    task.wait(1)               -- tunggu atribut template terisi
+    if hideOpt.on and alive then pcall(hideModel, m) end
+  end)
+  connect(placed.ChildRemoved, function(m)
+    local rec = hiddenModels[m]
+    if rec then pcall(function() rec.conn:Disconnect() end) hiddenModels[m] = nil hideOpt.count = hideOpt.count - 1 end
+  end)
+end)
+
 -- =====================================================================================================
 -- RUDAL: auto-mark lewat fungsi game MissileTargeting.assignTarget (getgc)
 -- =====================================================================================================
@@ -1215,6 +1293,7 @@ do
       if id then playerOn[id] = playerOn[id] == false end
     end)
   end
+  ui.espHide = button(pg, function() setHide(not hideOpt.on) end)
   ui.espStream = button(pg, function() esp.stream = not esp.stream end)
   ui.espScan = button(pg, function() fullRescan() end)
   ui.espStatus = textLine(pg, C.muted)
@@ -1355,6 +1434,9 @@ local function renderESP()
       b.TextColor3 = playerOn[id] == false and C.muted or C.text
     end
   end
+  ui.espHide.Text = ("Sembunyikan gedung selain AD & rudal: %s%s"):format(hideOpt.on and "ON" or "OFF",
+    hideOpt.on and (" (%d)"):format(hideOpt.count) or "")
+  ui.espHide.BackgroundColor3 = hideOpt.on and C.on or C.card
   ui.espStream.Text = ("Muat semua plot tiap %ds: %s"):format(STREAM_EVERY, esp.stream and "ON" or "OFF")
   ui.espScan.Text = ">> Muat semua + scan ulang  [-]"
   ui.espStatus.Text = esp.status
@@ -1525,6 +1607,8 @@ local function stop()
   alive = false
   for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
   for m in pairs(entries) do dropEntry(m) end
+  hideOpt.on = false
+  pcall(showAllBuildings)      -- gedung yang disembunyikan dikembalikan
   pcall(function() holder:Destroy() end)
   pcall(function() gui:Destroy() end)
 end
