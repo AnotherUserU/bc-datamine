@@ -1146,7 +1146,7 @@ local function postLog(note)
       files[#files + 1] = { name = attachName(c), data = c.data }
       names[#names + 1] = files[#files].name
     end
-    post((msgN == 1 and summary(note) or "(lanjutan)") .. "\nFile: " .. table.concat(names, ", "), files)
+    post((msgN == 1 and summary(note) or ("**BC Hub** (%s) (lanjutan)"):format(lp.Name)) .. "\nFile: " .. table.concat(names, ", "), files)
     for _, c in ipairs(batch) do
       sentBytes[c.key] = c.to
       if c.to >= c.size and isOldSession(c.key) then sentBytes._done[c.key] = true end
