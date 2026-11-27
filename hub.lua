@@ -1264,16 +1264,19 @@ local function postLog(note)
   return sentN
 end
 
--- Webhook pemilik untuk kabar auto shuffle (Augustus ketemu / total PP terpakai). Disimpan TERBALIK supaya bot
--- pemindai URL webhook di GitHub tidak mengenalinya (repo publik); orang yang membaca kode tetap bisa menemukannya.
-K.OWNER_HOOK = ("wX0NBjx3_LJpsxcwX_oSdq_HO6Msj_cHDdEuSmd-VV5K1Xv87sYXiK2OBcRopn6ZUuTV/9680536441849185751/"
-  .. "skoohbew/ipa/moc.drocsid//:sptth"):reverse()
+-- Webhook kabar auto shuffle (Augustus ketemu / total PP terpakai). Diisi pemain di tab SHUFFLE, disimpan lokal
+-- di workspace (tidak ada URL di script / repo). Kosong = tidak ada kabar.
+K.SHUF_HOOK_FILE = "bc_hub_shufhook.txt"
 K.OWNER_REPORT_EVERY = 1800   -- detik; ringkasan total PP terpakai selama auto shuffle menyala
+shuf.hook = ""
+pcall(function()
+  if isfile(K.SHUF_HOOK_FILE) then shuf.hook = readfile(K.SHUF_HOOK_FILE):gsub("%s", "") end
+end)
 ownerNotify = function(text)
-  if not httpRequest then return end
+  if not httpRequest or not validWebhook(shuf.hook) then return end
   task.spawn(function()
-    local ok, err = pcall(post, text, {}, K.OWNER_HOOK)
-    if not ok then log("SHUF", "kabar ke webhook pemilik gagal: " .. redact(err)) end
+    local ok, err = pcall(post, text, {}, shuf.hook)
+    if not ok then log("SHUF", "kabar ke webhook shuffle gagal: " .. redact(err)) end
   end)
 end
 function shuf.report(reason)
@@ -1503,6 +1506,17 @@ do
     if not shuf.on then shuf.report("dimatikan") end
   end)
   ui.shufStatus = textLine(pg)
+  local hookBox = input(pg, "Webhook kabar shuffle", "https://discord.com/api/webhooks/...", function(box)
+    local url = box.Text:gsub("%s", "")
+    box.Text = ""
+    if url == "" then return end
+    if not validWebhook(url) then shuf.err = "Webhook kabar shuffle tidak valid" return end
+    shuf.hook, shuf.err = url, ""
+    pcall(writefile, K.SHUF_HOOK_FILE, url)
+    log("SHUF", "webhook kabar shuffle disimpan")
+  end)
+  hookBox.TextTruncate = Enum.TextTruncate.AtEnd
+  ui.shufHook = textLine(pg, C.muted)
   ui.shufStats = textLine(pg, C.muted)
   ui.shufErr = textLine(pg, C.red)
   textLine(pg, C.muted).Text = "Pool sekarang:"
@@ -1636,6 +1650,10 @@ local function renderShuffle()
     or (shuf.found and "DITEMUKAN - klik untuk lanjut" or "Auto Shuffle: OFF (klik untuk mulai)")
   ui.shufOn.BackgroundColor3 = shuf.found and C.gold or (shuf.on and C.on or C.off)
   ui.shufStatus.Text = shuf.status
+  ui.shufHook.Text = validWebhook(shuf.hook)
+    and ("Kabar shuffle: tersimpan (...%s). Augustus ketemu = langsung dikirim; belum ketemu = total PP tiap %d menit.")
+      :format(shuf.hook:sub(-6), K.OWNER_REPORT_EVERY / 60)
+    or "Kabar shuffle: belum diisi (tempel webhook di atas, langsung tersimpan)"
   ui.shufStatus.TextColor3 = shuf.found and C.gold or C.text
   ui.shufStats.Text = ("Shuffle: %d | PP terpakai: %d | PP sekarang: %d | Gagal: %d\nCity Hall: %s | "
     .. "Peluang Augustus ~0,05%%/shuffle (rata-rata ~2000 shuffle)")
