@@ -897,6 +897,97 @@ local function shuffleStep()
 end
 
 -- =====================================================================================================
+-- KAMERA REKAM SAAT AFK: server hanya mengirim event rudal di sekitar posisi KAMERA pemain (PlotInterest /
+-- RemoteViewFocus). Setelah 5 menit tanpa input, kamera (sungguhan) dipindah ke pertempuran terbesar supaya
+-- event di sana ikut terekam. Input apa pun = kamera langsung dikembalikan. Default mati; pengaturan disimpan.
+-- Titik pertempuran dihitung dari posisi intercept / ledakan / tujuan rudal yang terdengar oleh log perang.
+-- =====================================================================================================
+K.CAMREC_FILE = "bc_hub_camrec.txt"
+K.CAMREC_IDLE = 300          -- detik tanpa input sebelum kamera rekam aktif
+K.CAMREC_WINDOW = 90         -- detik; kejadian selama ini dipakai untuk mencari pertempuran terbesar
+K.CAMREC_CELL = 1000         -- stud; kotak pengelompokan kejadian
+K.CAMREC_HEIGHT, K.CAMREC_BACK = 900, 700
+K.CAMREC_MOVE_MIN = 300      -- stud; kamera hanya dipindah kalau pertempuran bergeser sejauh ini
+local camrec = { on = false, active = false, lastInput = os.clock(), ignoreUntil = 0, points = {},
+                 center = nil, saved = nil, status = "Mati" }
+pcall(function()
+  if isfile and isfile(K.CAMREC_FILE) then camrec.on = readfile(K.CAMREC_FILE):find("1") ~= nil end
+end)
+
+function camrec.note(p)
+  if typeof(p) == "Vector3" then camrec.points[#camrec.points + 1] = { t = os.clock(), p = p } end
+end
+function camrec.observe(name, args)   -- dipanggil dari pendengar log perang (tidak menyentuh GUI)
+  if name == "MissileIntercepted" then camrec.note(args[2]) return end
+  if args[1] ~= "VisualBatch" or type(args[2]) ~= "table" then return end
+  for _, item in ipairs(args[2]) do
+    if type(item) == "table" then
+      if name == "MissileFlight" and type(item[1]) == "table" then camrec.note(item[1].to)
+      elseif name == "WorldEffect" then camrec.note(item[2]) end
+    end
+  end
+end
+function camrec.hotspot()            -- pusat kumpulan kejadian terbanyak dalam K.CAMREC_WINDOW detik terakhir
+  local now, cells, keep = os.clock(), {}, {}
+  for _, e in ipairs(camrec.points) do
+    if now - e.t <= K.CAMREC_WINDOW then
+      keep[#keep + 1] = e
+      local key = math.floor(e.p.X / K.CAMREC_CELL) .. "," .. math.floor(e.p.Z / K.CAMREC_CELL)
+      local c = cells[key] or { n = 0, sum = Vector3.zero }
+      c.n, c.sum = c.n + 1, c.sum + e.p
+      cells[key] = c
+    end
+  end
+  camrec.points = keep
+  local best
+  for _, c in pairs(cells) do if not best or c.n > best.n then best = c end end
+  if not best then return nil, 0 end
+  return best.sum / best.n, best.n
+end
+function camrec.restore()
+  if not camrec.active then return end
+  camrec.active, camrec.center = false, nil
+  local cam, s = workspace.CurrentCamera, camrec.saved
+  pcall(function()
+    cam.CameraType = s and s.type or Enum.CameraType.Custom
+    cam.CameraSubject = (s and s.subject) or (lp.Character and lp.Character:FindFirstChildOfClass("Humanoid"))
+    if s and s.cframe then cam.CFrame = s.cframe end
+  end)
+  log("HUB", "kamera rekam: kamera dikembalikan ke pemain")
+end
+function camrec.point(center)
+  local cam = workspace.CurrentCamera
+  if not camrec.active then
+    camrec.saved = { type = cam.CameraType, subject = cam.CameraSubject, cframe = cam.CFrame }
+    camrec.active = true
+    log("HUB", "kamera rekam: aktif setelah AFK")
+  end
+  cam.CameraType = Enum.CameraType.Scriptable
+  cam.CFrame = CFrame.lookAt(center + Vector3.new(0, K.CAMREC_HEIGHT, K.CAMREC_BACK), center)
+  camrec.center = center
+end
+function camrec.set(on)
+  camrec.on = on
+  pcall(writefile, K.CAMREC_FILE, on and "1" or "0")
+  camrec.lastInput = os.clock()
+  if not on then camrec.restore() end
+  log("HUB", "kamera rekam AFK: " .. (on and "ON" or "OFF"))
+end
+do   -- input pemain: catat waktunya, dan kembalikan kamera kalau sedang dipakai merekam
+  local function onUserInput()
+    if os.clock() < camrec.ignoreUntil or not current() then return end   -- klik anti-AFK bukan input pemain
+    camrec.lastInput = os.clock()
+    if camrec.active then camrec.restore() end
+  end
+  connect(UIS.InputBegan, onUserInput)
+  connect(UIS.InputChanged, function(i)
+    local t = i.UserInputType
+    if t == Enum.UserInputType.MouseWheel or t == Enum.UserInputType.Touch
+      or (t == Enum.UserInputType.MouseMovement and i.Delta.Magnitude >= 1) then onUserInput() end
+  end)
+end
+
+-- =====================================================================================================
 -- ANTI-AFK (bersama)
 -- =====================================================================================================
 local afk = { on = true, count = 0 }
@@ -904,6 +995,7 @@ pcall(function()
   local VirtualUser = game:GetService("VirtualUser")
   connect(lp.Idled, function()
     if not current() or not afk.on then return end
+    camrec.ignoreUntil = os.clock() + 2   -- klik virtual ini jangan dianggap pemain kembali
     pcall(function()
       VirtualUser:CaptureController()
       VirtualUser:ClickButton2(Vector2.new())
@@ -987,9 +1079,10 @@ local function combatStart()
           if r:IsA("RemoteEvent") then
             found[#found + 1] = r:GetFullName()
             connect(r.OnClientEvent, function(...)
+              local args, parts = table.pack(...), {}
+              pcall(camrec.observe, r.Name, args)   -- titik pertempuran untuk kamera rekam
               if not combat.on then return end
               combat.events = combat.events + 1
-              local args, parts = table.pack(...), {}
               for i = 1, args.n do parts[#parts + 1] = cfmt(args[i]) end
               cline(r.Name .. " " .. table.concat(parts, " | "))
             end)
@@ -1419,6 +1512,8 @@ do
   everyBox.Text = hook.every > 0 and tostring(hook.every / 60) or ""
   ui.combatOn = button(pg, function() combat.on = not combat.on end)
   ui.combatInfo = textLine(pg, C.muted)
+  ui.camrecBtn = button(pg, function() camrec.set(not camrec.on) end)
+  ui.camrecInfo = textLine(pg, C.muted)
   ui.hookSend = button(pg, function() sendLog("(kirim manual)") end)
   ui.hookStatus = textLine(pg)
   textLine(pg, C.muted).Text = "Augustus ditemukan = log otomatis terkirim (kalau webhook sudah diisi)."
@@ -1523,6 +1618,10 @@ local function renderShuffle()
 end
 
 local function renderLog()
+  ui.camrecBtn.Text = ("Kamera rekam saat AFK (%d menit): %s"):format(K.CAMREC_IDLE / 60, camrec.on and "ON" or "OFF")
+  ui.camrecBtn.BackgroundColor3 = camrec.on and C.on or C.card
+  ui.camrecInfo.Text = camrec.status .. "\nKamera pindah ke pertempuran terbesar supaya event rudal di sana ikut terekam. "
+    .. "Sentuh / gerakkan mouse = kamera kembali."
   ui.combatOn.Text = "Log perang (rudal & intercept): " .. (combat.on and "ON" or "OFF")
   ui.combatOn.BackgroundColor3 = combat.on and C.on or C.off
   ui.combatInfo.Text = ("%d event, %d air defense dilacak, %d remote\nFile: %s"):format(
@@ -1632,6 +1731,7 @@ local function stop()
   hideOpt.on = false
   pcall(showAllBuildings)      -- gedung yang disembunyikan dikembalikan
   if light.on then pcall(setLight, false) end   -- rendering 3D + FPS normal lagi
+  pcall(camrec.restore)                          -- kamera kembali ke pemain
   pcall(function() holder:Destroy() end)
   pcall(function() gui:Destroy() end)
 end
@@ -1693,6 +1793,31 @@ task.spawn(function()
       delay = 3
     end
     task.wait(delay)
+  end
+end)
+
+-- ===== kamera rekam saat AFK: cek tiap 5 dtk =====
+task.spawn(function()
+  waitUnlock()
+  while running() do
+    local center, n = camrec.hotspot()     -- dipanggil terus supaya daftar kejadian lama dibuang
+    local idle = os.clock() - camrec.lastInput
+    if not camrec.on then
+      camrec.status = "Mati"
+    elseif idle < K.CAMREC_IDLE then
+      local left = math.ceil(K.CAMREC_IDLE - idle)
+      camrec.status = ("Menunggu AFK: %d:%02d lagi"):format(math.floor(left / 60), left % 60)
+    elseif not center then
+      camrec.status = "AFK, tapi belum ada pertempuran terdeteksi"
+    else
+      if not camrec.active or not camrec.center or (center - camrec.center).Magnitude > K.CAMREC_MOVE_MIN then
+        local ok, err = pcall(camrec.point, center)
+        if not ok then log("HUB", "kamera rekam gagal: " .. tostring(err)) end
+      end
+      camrec.status = ("Aktif: kamera di pertempuran (%.0f, %.0f), %d kejadian dalam %d dtk"):format(
+        center.X, center.Z, n, K.CAMREC_WINDOW)
+    end
+    task.wait(5)
   end
 end)
 
