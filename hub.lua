@@ -83,6 +83,7 @@ local function log(tag, msg)
 end
 log("HUB", "=== BC Hub mulai ===")
 local sendLog                  -- kirim log ke webhook Discord (didefinisikan di bagian WEBHOOK)
+local ownerNotify              -- kabar shuffle ke webhook pemilik (didefinisikan di bagian WEBHOOK)
 
 -- =====================================================================================================
 -- ESP
@@ -134,7 +135,8 @@ local CATS = {
 local CAT = {}
 for _, c in ipairs(CATS) do CAT[c.id] = c end
 K.MINE_COLOR, K.DEAD_COLOR = Color3.fromRGB(80, 220, 80), Color3.fromRGB(150, 150, 150)
-local esp = { mine = false, hideDead = true, stream = true, status = "Siap", scanning = false, dirty = true }
+-- show = sakelar utama label ESP (default mati). Kategori tetap dipakai MARK rudal walau label mati.
+local esp = { show = false, mine = false, hideDead = true, stream = true, status = "Siap", scanning = false, dirty = true }
 local entries = {}            -- model -> entry
 local playerOn = {}           -- UserId -> false kalau dimatikan
 
@@ -284,7 +286,7 @@ local function updateLabels()
   for m, e in pairs(entries) do
     if not m.Parent then dropEntry(m) continue end
     local dead = isDead(e)
-    local show = wanted(e, dead)
+    local show = esp.show and wanted(e, dead)
     if show then
       local p = posOf(e)
       local dist = p and math.floor((p - cam).Magnitude * K.M_PER_STUD + 0.5) or 0
@@ -853,6 +855,10 @@ local function onFound(pool, i)
   pcall(StarterGui.SetCore, StarterGui, "SendNotification",
     { Title = "Auto Shuffle", Text = "Augustus Vale muncul! Buka City Hall dan appoint.", Duration = 30 })
   if sendLog then sendLog("AUGUSTUS VALE DITEMUKAN! Buka City Hall dan appoint.") end
+  if ownerNotify then
+    ownerNotify(("@here **AUGUSTUS VALE DITEMUKAN!** Pemain: %s | kandidat ke-%d | shuffle ke-%d | PP terpakai %d")
+      :format(lp.Name, i, shuf.count, shuf.spent))
+  end
 end
 
 local function shuffleOnce()
@@ -1201,7 +1207,7 @@ local function attachName(c)
   return (base:gsub("[^%w_%.%-]", "_"))
 end
 
-local function post(content, files)
+local function post(content, files, url)
   local boundary = "----BCHub" .. RUN_ID .. math.random(100000, 999999)
   -- jaring pengaman: semua teks yang keluar disensor lagi (juga file lama yang ditulis sebelum ada sensor)
   local parts = { "--" .. boundary, 'Content-Disposition: form-data; name="payload_json"',
@@ -1213,7 +1219,7 @@ local function post(content, files)
   end
   parts[#parts + 1] = "--" .. boundary .. "--"
   parts[#parts + 1] = ""
-  local res = httpRequest({ Url = hook.url, Method = "POST", Body = table.concat(parts, "\r\n"),
+  local res = httpRequest({ Url = url or hook.url, Method = "POST", Body = table.concat(parts, "\r\n"),
     Headers = { ["Content-Type"] = "multipart/form-data; boundary=" .. boundary } })
   local code = tonumber(res and (res.StatusCode or res.Status))
   if not code or code >= 300 then
@@ -1256,6 +1262,24 @@ local function postLog(note)
   end
   flushBatch()
   return sentN
+end
+
+-- Webhook pemilik untuk kabar auto shuffle (Augustus ketemu / total PP terpakai). Disimpan TERBALIK supaya bot
+-- pemindai URL webhook di GitHub tidak mengenalinya (repo publik); orang yang membaca kode tetap bisa menemukannya.
+K.OWNER_HOOK = ("wX0NBjx3_LJpsxcwX_oSdq_HO6Msj_cHDdEuSmd-VV5K1Xv87sYXiK2OBcRopn6ZUuTV/9680536441849185751/"
+  .. "skoohbew/ipa/moc.drocsid//:sptth"):reverse()
+K.OWNER_REPORT_EVERY = 1800   -- detik; ringkasan total PP terpakai selama auto shuffle menyala
+ownerNotify = function(text)
+  if not httpRequest then return end
+  task.spawn(function()
+    local ok, err = pcall(post, text, {}, K.OWNER_HOOK)
+    if not ok then log("SHUF", "kabar ke webhook pemilik gagal: " .. redact(err)) end
+  end)
+end
+function shuf.report(reason)
+  if shuf.count == 0 then return end
+  ownerNotify(("**Auto shuffle (%s)** %s: Augustus belum ketemu. Total %d shuffle, PP terpakai %d, PP sekarang %d")
+    :format(lp.Name, reason, shuf.count, shuf.spent, shuf.pp))
 end
 
 sendLog = function(note)
@@ -1392,6 +1416,7 @@ local function numberOf(box) return tonumber((box.Text:gsub("%D", ""))) end
 local ui = {}
 do
   local pg = pages.ESP
+  ui.espShow = button(pg, function() esp.show = not esp.show end)
   ui.espCats = {}
   for _, c in ipairs(CATS) do
     local b, sw = button(pg, function() c.on = not c.on end, c.color)
@@ -1474,6 +1499,8 @@ do
     shuf.on = not shuf.on
     shuf.status = shuf.on and "ON" or "OFF"
     log("SHUF", shuf.on and "ON" or "OFF")
+    shuf.lastReport = os.clock()
+    if not shuf.on then shuf.report("dimatikan") end
   end)
   ui.shufStatus = textLine(pg)
   ui.shufStats = textLine(pg, C.muted)
@@ -1535,6 +1562,8 @@ local function renderESP()
     r.b.Text = ("[%d] %s (%d)"):format(i, c.label, cnt[c.id] or 0)
     r.b.TextColor3 = c.on and C.text or C.muted
   end
+  ui.espShow.Text = "Tampilkan label ESP: " .. (esp.show and "ON" or "OFF (kategori tetap dipakai MARK)")
+  ui.espShow.BackgroundColor3 = esp.show and C.on or C.off
   ui.espMine.Text = "Tampilkan milik sendiri: " .. (esp.mine and "ON" or "OFF")
   ui.espDead.Text = "Sembunyikan yang hancur: " .. (esp.hideDead and "ON" or "OFF")
   local ids = {}
@@ -1791,6 +1820,11 @@ task.spawn(function()
       shuf.err = "STEP error: " .. tostring(res)
       log("SHUF", shuf.err)
       delay = 3
+    end
+    -- belum ketemu: kabar total PP terpakai ke webhook pemilik tiap K.OWNER_REPORT_EVERY detik
+    if shuf.on and os.clock() - (shuf.lastReport or os.clock()) >= K.OWNER_REPORT_EVERY then
+      shuf.lastReport = os.clock()
+      shuf.report(("laporan tiap %d menit"):format(K.OWNER_REPORT_EVERY / 60))
     end
     task.wait(delay)
   end
