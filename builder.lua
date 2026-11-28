@@ -158,8 +158,10 @@ local function readCity()
 end
 local function covered(list, u, v, needReady)
   for _, s in ipairs(list) do
-    if (s.ready or not needReady) and math.abs(s.u - u) <= s.r * 0.95 and math.abs(s.v - v) <= s.r * 0.95
-      and ((s.u - u) ^ 2 + (s.v - v) ^ 2) <= s.r * s.r then return true end
+    -- jangkauan berbentuk kotak (tooltip game: range 150 = area 300x300), sisakan 5% untuk aman
+    if (s.ready or not needReady) and math.abs(s.u - u) <= s.r * 0.95 and math.abs(s.v - v) <= s.r * 0.95 then
+      return true
+    end
   end
   return false
 end
@@ -237,6 +239,11 @@ local function chunkOrder()
   return list
 end
 -- semua slot kosong untuk tapak w x d, berurutan dari chunk awal. Kembalikan { u0, v0, k }.
+local scanSteps = 0
+local function yieldSometimes()   -- loop pencarian panjang: beri jeda supaya game tidak membeku
+  scanSteps = scanSteps + 1
+  if scanSteps % 3000 == 0 then task.wait() end
+end
 local function slots(w, d, maxCount)
   local out, size = {}, plot.Size.X / Chunks.GridSize
   for _, c in ipairs(chunkOrder()) do
@@ -247,6 +254,7 @@ local function slots(w, d, maxCount)
           if v0 >= cv0 and v0 + d <= cv0 + size then
             local u = cu0
             while u + w <= cu0 + size do
+              yieldSometimes()
               if freeRect(u, v0, w, d) then
                 out[#out + 1] = { u0 = u, v0 = v0, k = k }
                 if #out >= maxCount then return out end
@@ -353,17 +361,39 @@ local function targetHousing()
 end
 
 -- ===== beli chunk =====
+-- InvokeServer bisa menunggu selamanya kalau server tidak menjawab, jadi diberi batas waktu
+local function invokeTimeout(remote, timeout, ...)
+  local args, done, ok, res = { ... }, false, false, nil
+  task.spawn(function()
+    ok, res = pcall(remote.InvokeServer, remote, table.unpack(args))
+    done = true
+  end)
+  local t0 = os.clock()
+  while not done and os.clock() - t0 < timeout do task.wait(0.1) end
+  if not done then return false, "tidak dijawab server" end
+  return ok, res
+end
+local function brief(v)
+  if type(v) ~= "table" then return tostring(v) end
+  local parts = {}
+  for k, x in pairs(v) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(x) end
+  return "{" .. table.concat(parts, ", ") .. "}"
+end
 local function buyChunks()
   local remotes = RS:FindFirstChild("LandChunkRemotes")
   local buy = remotes and remotes:FindFirstChild("PurchaseChunk")
   if not buy then return end
+  local tried = {}
   for _ = 1, Chunks.ChunkCount do
     local mask, bought = Chunks.GetPlayerMask(lp, plot), false
     for x = 1, Chunks.GridSize do
       for z = 1, Chunks.GridSize do
-        if not Chunks.IsUnlocked(mask, x, z) and Chunks.HasUnlockedNeighbor(mask, x, z) then
-          local ok, res = pcall(buy.InvokeServer, buy, x, z)
-          note("beli chunk (%d,%d): %s", x, z, ok and tostring(res) or "gagal")
+        local key = x .. ":" .. z
+        if not tried[key] and not Chunks.IsUnlocked(mask, x, z) and Chunks.HasUnlockedNeighbor(mask, x, z) then
+          tried[key] = true
+          st.status = ("Membeli chunk (%d,%d)..."):format(x, z)
+          local ok, res = invokeTimeout(buy, 8, x, z)
+          note("beli chunk (%d,%d): %s", x, z, ok and brief(res) or tostring(res))
           bought = true
           task.wait(1)
           mask = Chunks.GetPlayerMask(lp, plot)
@@ -371,12 +401,14 @@ local function buyChunks()
         end
       end
     end
-    if not bought then return end
+    if not bought then break end
   end
+  note("chunk terbuka: %d/%d", Chunks.GetUnlockedCount(Chunks.GetPlayerMask(lp, plot)), Chunks.ChunkCount)
 end
 
 -- ===== satu putaran =====
 local function tick()
+  st.status = "Membaca kota..."
   readCity()
   local level = stat("CityLevel")
   st.stats = ("Level %d | Populasi %d | Penghuni rumah %s | Listrik sisa %d | Gedung %d")
@@ -398,6 +430,7 @@ local function tick()
   end
   local t = targetHousing()
   local it = item(t)
+  st.status = "Membaca ukuran " .. tostring(t) .. "..."
   local w, d = footprint(t)
   if not (it and w) then
     st.status = "Tidak bisa membaca ukuran " .. tostring(t)
@@ -406,6 +439,7 @@ local function tick()
   local energyLeft = stat("EnergyAvailable") - pendingEnergy() - K.ENERGY_MARGIN
   local budget = it.energyDemand and it.energyDemand > 0 and math.floor(energyLeft / it.energyDemand) or K.BATCH
   local placedN, needService, genPlaced = 0, nil, false
+  st.status = ("Mencari tempat %s (%dx%d)..."):format(t, w, d)
   for _, s in ipairs(slots(w, d, K.BATCH * 3)) do
     if placedN >= math.min(K.BATCH, budget) then break end
     local cu, cv = s.u0 + w / 2, s.v0 + d / 2
@@ -451,6 +485,7 @@ local function runLoop()
   half = plot.Size * 0.5
   note("mulai. plot %s, ukuran %.0f", tostring(plot.Position), plot.Size.X)
   buyChunks()
+  note("putaran bangun dimulai")
   while current() and running do
     local ok, err = pcall(tick)
     if not ok then note("error: %s", tostring(err)) end
