@@ -33,6 +33,11 @@ local K = {
   CHUNK_GAP = 0.3,         -- detik antar-potongan kalau satu gelombang > 100
   DEFAULT_GAP = 3,         -- detik antar-gelombang
   IDLE_WAIT = 5,           -- detik tunggu kalau satu putaran penuh tidak ada yang bisa ditembak
+  ALL_COUNT = 9999,        -- jumlah untuk "semua <jenis>"
+  NAVY_WEAPONS = { "Tomahawk", "SLBM" },   -- senjata kapal untuk sasaran darat (ShipKinds role "land")
+  NAVY_RANGE = { Tomahawk = { 150, 12000 }, SLBM = { 300, 12000 } },
+  REPAIR_EVERY = 10,       -- detik antar-cek auto repair
+  REPAIR_RETRY = 30,       -- detik sebelum minta repair bangunan yang sama lagi
   SCAN_HEIGHT = 600,       -- kamera pindai: tinggi & mundur dari tengah kota musuh
   SCAN_BACK = 400,
   SCAN_MAX = 90,           -- detik maks seluruh pindai
@@ -98,7 +103,8 @@ local SEPARATE = {
 
 local alive, running = true, false
 local conns = {}
-local st = { target = nil, picking = false, loop = true, status = "Pilih target dulu.", log = {}, serverMsg = "" }
+local st = { target = nil, picking = false, loop = true, navy = true, repair = true,
+  status = "Pilih target dulu.", log = {}, serverMsg = "", repairMsg = "" }
 
 local function current() return alive and GUI_PARENT:GetAttribute("BCAttackRun") == RUN_ID end
 local function note(msg)
@@ -120,10 +126,15 @@ local function parseLine(line)
   local parts = {}
   for chunk in line:gmatch("[^+]+") do
     local n, name = chunk:match("^%s*(%d+)%s*[xX]?%s*(.-)%s*$")
-    if not n or name == "" then return nil, "format salah: \"" .. chunk .. "\"" end
+    local all = false
+    if not n then   -- "semua shahed" / "all srbm" = semua launcher yang siap (ikut naik kalau HQ di-upgrade)
+      name = chunk:lower():match("^%s*semua%s+(.-)%s*$") or chunk:lower():match("^%s*all%s+(.-)%s*$")
+      all, n = name ~= nil, K.ALL_COUNT
+    end
+    if not n or not name or name == "" then return nil, "format salah: \"" .. chunk .. "\"" end
     local templates = resolve(name)
     if not templates then return nil, "jenis tidak dikenal: \"" .. name .. "\"" end
-    parts[#parts + 1] = { count = tonumber(n), name = name, templates = templates }
+    parts[#parts + 1] = { count = tonumber(n), name = name, templates = templates, all = all }
   end
   return parts
 end
@@ -277,15 +288,70 @@ local function sendBarrage(entries, from, to)
   return #chunk
 end
 
+-- ===== cadangan kapal: tutup kekurangan launcher darat (rusak / repair / reload) =====
+-- Sama dengan tombol fire kapal di game: NavalRemotes.Fire {ships={kapal}, weapon, target, rounds=1}
+-- per sasaran. Hanya kapal sendiri yang aktif, tidak hancur, masih punya amunisi, dan sasaran dalam jangkauan.
+local function shipPos(ship)
+  local s = ship:GetAttribute("ShipState")
+  if typeof(s) == "Vector3" then return Vector2.new(s.X, s.Y) end
+  local ok, cf = pcall(ship.GetPivot, ship)
+  return ok and Vector2.new(cf.Position.X, cf.Position.Z) or nil
+end
+
+local function navyShooters()
+  local list, ships = {}, workspace:FindFirstChild("Ships")
+  for _, ship in ipairs(ships and ships:GetChildren() or {}) do
+    local readiness = ship:GetAttribute("Readiness")
+    if ship:GetAttribute("OwnerUserId") == lp.UserId and ship:GetAttribute("Destroyed") ~= true
+      and (readiness == nil or readiness == "Active") then
+      local motion = ship:GetAttribute("ShipMotion")
+      local submerged = typeof(motion) == "Vector3" and motion.Z > 1.5
+      for _, w in ipairs(K.NAVY_WEAPONS) do
+        local ammo = tonumber(ship:GetAttribute("Ammo_" .. w)) or 0
+        if ammo > 0 and (w ~= "SLBM" or submerged) then
+          list[#list + 1] = { ship = ship, weapon = w, ammo = ammo, pos = shipPos(ship) }
+        end
+      end
+    end
+  end
+  return list
+end
+
+local function navyFire(count, aim)
+  local remotes = RS:FindFirstChild("NavalRemotes")
+  local fire = remotes and remotes:FindFirstChild("Fire")
+  if count <= 0 or not fire then return 0 end
+  local shooters, sent = navyShooters(), 0
+  for _ = 1, count do
+    if not (current() and running) then break end
+    local point = aim()
+    local pick
+    for _, s in ipairs(shooters) do
+      local range = K.NAVY_RANGE[s.weapon]
+      local d = s.pos and (s.pos - Vector2.new(point.X, point.Z)).Magnitude
+      if s.ammo > 0 and d and d >= range[1] and d <= range[2] then pick = s break end
+    end
+    if not pick then break end
+    local ok = pcall(fire.FireServer, fire, { ships = { pick.ship }, weapon = pick.weapon, target = point, rounds = 1 })
+    if ok then pick.ammo, sent = pick.ammo - 1, sent + 1 end
+  end
+  return sent
+end
+
 -- Satu gelombang: sisa gelombang sebelumnya (carry) + launcher gelombang ini.
 -- Tembak per 99. Kalau totalnya lewat 99, sisanya TIDAK ditembak sendiri tapi ikut barrage gelombang
 -- berikutnya (contoh: 104 -> 99 sekarang, 5 ikut 12 hypers = 17). Gelombang terakhir menembak semuanya.
 local function fireWave(index, wave, aim, used, carry, isLast)
   local entries, summary = carry, {}
-  local fromCarry = #carry
+  local fromCarry, short = #carry, 0
   for _, part in ipairs(wave.parts) do
     local got = buildPart(part, aim, used, entries)
-    summary[#summary + 1] = ("%s %d/%d"):format(part.name, got, part.count)
+    if part.all then
+      summary[#summary + 1] = ("%s %d (semua)"):format(part.name, got)
+    else
+      summary[#summary + 1] = ("%s %d/%d"):format(part.name, got, part.count)
+      short = short + (part.count - got)
+    end
   end
   local limit, sent, i = K.BARRAGE_LIMIT, 0, 1
   local overflow = #entries > limit
@@ -300,10 +366,12 @@ local function fireWave(index, wave, aim, used, carry, isLast)
   elseif rest > 0 and current() and running then
     sent = sent + sendBarrage(entries, i, #entries)
   end
-  note(("G%d: %s | tembak %d%s%s"):format(index, table.concat(summary, ", "), sent,
+  local navy = (st.navy and short > 0 and current() and running) and navyFire(short, aim) or 0
+  note(("G%d: %s | tembak %d%s%s%s"):format(index, table.concat(summary, ", "), sent,
     fromCarry > 0 and (" (+%d sisa sebelumnya)"):format(fromCarry) or "",
-    #nextCarry > 0 and (", %d ikut gelombang berikut"):format(#nextCarry) or ""))
-  return sent, nextCarry
+    #nextCarry > 0 and (", %d ikut gelombang berikut"):format(#nextCarry) or "",
+    short > 0 and (" | kurang %d, kapal %d"):format(short, navy) or ""))
+  return sent + navy, nextCarry
 end
 
 -- satu putaran = semua baris dari atas ke bawah. Mode ulang: putar terus sampai BERHENTI ditekan.
@@ -329,6 +397,42 @@ local function runPlan(waves, gap)
   st.status = running and "Selesai. Cek log di bawah." or "Dihentikan."
   running = false
 end
+
+-- ===== auto repair: launcher rudal & AD milik sendiri yang hancur =====
+-- Sama dengan tombol Rebuild di game (BuildingRepairRemotes.RepairBuilding). Biaya ditanggung seperti biasa;
+-- kalau uang kurang, server menolak dan alasannya tampil di panel.
+local repairAsked = {}
+local function autoRepairOnce()
+  local remotes = RS:FindFirstChild("BuildingRepairRemotes")
+  local repair = remotes and remotes:FindFirstChild("RepairBuilding")
+  if not repair then return end
+  local now, asked = os.clock(), 0
+  for _, b in ipairs(Placed:GetChildren()) do
+    local t = b:IsA("Model") and b:GetAttribute("RoadTemplateName")
+    if t and (LAUNCHER_TEMPLATES[t] or AD_TEMPLATES[t]) and b:GetAttribute("PlacementOwnerUserId") == lp.UserId
+      and b:GetAttribute("Destroyed") == true and b:GetAttribute("UnderRepair") ~= true
+      and now - (repairAsked[b] or -math.huge) >= K.REPAIR_RETRY then
+      repairAsked[b] = now
+      if pcall(repair.FireServer, repair, b) then asked = asked + 1 end
+    end
+  end
+  if asked > 0 then st.repairMsg = os.date("%H:%M:%S ") .. ("minta repair %d bangunan"):format(asked) end
+end
+do
+  local remotes = RS:FindFirstChild("BuildingRepairRemotes")
+  local result = remotes and remotes:FindFirstChild("RepairResult")
+  if result then
+    table.insert(conns, result.OnClientEvent:Connect(function(ok, msg)
+      if not ok and msg then st.repairMsg = "Repair ditolak: " .. tostring(msg) end
+    end))
+  end
+end
+task.spawn(function()
+  while current() do
+    if st.repair then pcall(autoRepairOnce) end
+    task.wait(K.REPAIR_EVERY)
+  end
+end)
 
 -- ===== pilih target: klik berikutnya di dunia (bukan di panel) =====
 local function groundAt(pos)
@@ -412,6 +516,8 @@ end
 local function holdUntilStable(cam, spot, e, label, started)
   local view = CFrame.lookAt(spot + Vector3.new(0, K.SCAN_HEIGHT, K.SCAN_BACK), spot)
   local last, stable, t0 = -1, 0, os.clock()
+  -- minta server mengalirkan area ini juga (fungsi yang sama dipakai peta rudal game)
+  task.spawn(pcall, lp.RequestStreamAroundAsync, lp, spot)
   while os.clock() - t0 < K.SCAN_SPOT_MAX and os.clock() - started < K.SCAN_MAX and current() do
     cam.CFrame = view
     task.wait(1)
@@ -480,7 +586,7 @@ local C = {
 local gui = Instance.new("ScreenGui")
 gui.Name, gui.ResetOnSpawn, gui.DisplayOrder = "BCAttack", false, 60
 local frame = Instance.new("Frame")
-frame.Size, frame.Position = UDim2.fromOffset(320, 466), UDim2.new(1, -332, 0, 80)
+frame.Size, frame.Position = UDim2.fromOffset(320, 514), UDim2.new(1, -332, 0, 60)
 frame.BackgroundColor3, frame.BorderSizePixel, frame.Active, frame.Draggable = C.bg, 0, true, true
 frame.Parent = gui
 Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
@@ -530,8 +636,11 @@ enemyBtn.TextTruncate = Enum.TextTruncate.AtEnd
 local pickBtn = button(10, 218, 96, 30, "KLIK PETA")
 local loopBtn = button(112, 218, 96, 30, "ULANG: ON")
 local fireBtn = button(214, 218, 96, 30, "SERANG", C.go)
-local statusLbl = label(256, 44, 12)
-local logLbl = label(302, 156, 11, C.dim, Enum.Font.Code)
+local navyBtn = button(10, 254, 148, 28, "KAPAL CADANGAN")
+local repairBtn = button(162, 254, 148, 28, "AUTO REPAIR")
+navyBtn.TextSize, repairBtn.TextSize = 11, 11
+local statusLbl = label(290, 58, 12)
+local logLbl = label(350, 156, 11, C.dim, Enum.Font.Code)
 
 local tab = make("TextButton", {
   Position = UDim2.new(1, -92, 0, 80), Size = UDim2.fromOffset(80, 26), BackgroundColor3 = C.bg,
@@ -568,6 +677,8 @@ for btn, step in pairs({ [prevBtn] = -1, [enemyBtn] = 0, [nextBtn] = 1 }) do
     pickEnemy(step)
   end)))
 end
+table.insert(conns, navyBtn.MouseButton1Click:Connect(clicked(function() st.navy = not st.navy end)))
+table.insert(conns, repairBtn.MouseButton1Click:Connect(clicked(function() st.repair = not st.repair end)))
 table.insert(conns, loopBtn.MouseButton1Click:Connect(clicked(function()
   st.loop = not st.loop   -- boleh diubah saat jalan: OFF = berhenti setelah putaran ini selesai
 end)))
@@ -600,12 +711,17 @@ task.spawn(function()
       enemyBtn.Text = st.enemyName and ("MUSUH: " .. st.enemyName) or "PILIH MUSUH"
       pickBtn.Text = st.picking and "BATAL" or "KLIK PETA"
       pickBtn.BackgroundColor3 = st.picking and C.warn or C.btn
+      navyBtn.Text = "KAPAL CADANGAN: " .. (st.navy and "ON" or "OFF")
+      navyBtn.BackgroundColor3 = st.navy and C.go or C.btn
+      repairBtn.Text = "AUTO REPAIR: " .. (st.repair and "ON" or "OFF")
+      repairBtn.BackgroundColor3 = st.repair and C.go or C.btn
       loopBtn.Text = st.loop and "ULANG: ON" or "ULANG: OFF"
       loopBtn.BackgroundColor3 = st.loop and C.go or C.btn
       fireBtn.Text = running and "BERHENTI" or "SERANG"
       fireBtn.BackgroundColor3 = running and C.stop or C.go
       local tgt = st.target and ("Target: %.0f, %.0f"):format(st.target.X, st.target.Z) or "Target: belum ada"
       statusLbl.Text = tgt .. "\n" .. st.status .. (st.serverMsg ~= "" and ("\nServer: " .. st.serverMsg) or "")
+        .. (st.repairMsg ~= "" and ("\nRepair: " .. st.repairMsg) or "")
       logLbl.Text = table.concat(st.log, "\n")
     end)
     task.wait(0.3)
