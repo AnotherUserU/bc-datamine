@@ -341,7 +341,7 @@ local function bestApartment()
   local level, best, bestScore = stat("CityLevel"), nil, -1
   for _, it in pairs(Catalog.Items) do
     if type(it) == "table" and it.category == "Housing" and it.subcategory == "Apartments" and not it.devOnly
-      and (it.minimumCityLevel or 1) <= level and isUnlockedT(it.templateName) then
+      and (it.minimumCityLevel or 1) <= level and canBuild(it.templateName) then
       local pop = it.effects and it.effects.population or 0
       local w, d = footprint(it.templateName)
       if pop > 0 and w and d <= K.ROAD_PITCH - 2 and (it.energyDemand or 0) > 0 then
@@ -352,12 +352,37 @@ local function bestApartment()
   end
   return best
 end
+-- rumah (Residential) terbaik yang SUDAH ter-unlock: populasi terbanyak
+local function bestHouse()
+  local best, bestPop = nil, -1
+  for _, it in pairs(Catalog.Items) do
+    if type(it) == "table" and it.category == "Housing" and it.subcategory == "Residential" and not it.devOnly
+      and canBuild(it.templateName) then
+      local pop = it.effects and it.effects.population or 0
+      if pop > bestPop and footprint(it.templateName) then best, bestPop = it.templateName, pop end
+    end
+  end
+  return best
+end
+-- kenapa gedung terkunci (teks syarat dari game), untuk panel
+local function lockReason(t)
+  local it = item(t)
+  if not it then return t .. ": tidak ada di katalog" end
+  local ok, text = pcall(Avail.RequirementText, lp, it)
+  return t .. ": " .. (ok and text ~= "" and text or "terkunci")
+end
 local function targetHousing()
   local houseRes = tonumber(lp:GetAttribute("HouseResidents")) or 0
-  local it = item(K.HOUSE)
-  local plannedHouses = (own.count[K.HOUSE] or 0) * (it and it.effects and it.effects.population or 5)
-  if math.max(houseRes, plannedHouses) < K.HOUSE_TARGET then return K.HOUSE end
-  return bestApartment() or K.HOUSE
+  local houseResPlanned = 0
+  for t, n in pairs(own.count) do
+    local it = item(t)
+    if it and it.category == "Housing" and it.subcategory == "Residential" then
+      houseResPlanned = houseResPlanned + n * (it.effects and it.effects.population or 0)
+    end
+  end
+  local house = bestHouse()
+  if math.max(houseRes, houseResPlanned) < K.HOUSE_TARGET and house then return house end
+  return bestApartment() or house
 end
 
 -- ===== beli chunk =====
@@ -408,7 +433,7 @@ end
 
 -- ===== satu putaran =====
 local function tick()
-  st.status = "Membaca kota..."
+  st.status, st.warn = "Membaca kota...", ""
   readCity()
   local level = stat("CityLevel")
   st.stats = ("Level %d | Populasi %d | Penghuni rumah %s | Listrik sisa %d | Gedung %d")
@@ -429,6 +454,10 @@ local function tick()
     placeServiceNear(K.WATER, homeU, homeV, entries)
   end
   local t = targetHousing()
+  if not t then
+    st.status = "Belum ada hunian yang terbuka. " .. lockReason(K.HOUSE)
+    return
+  end
   local it = item(t)
   st.status = "Membaca ukuran " .. tostring(t) .. "..."
   local w, d = footprint(t)
@@ -454,12 +483,22 @@ local function tick()
   end
   -- layanan untuk area yang belum terjangkau (hanya kalau belum ada yang sedang dibangun di sana)
   if needService then
-    if needService.water and not covered(own.water, needService.u, needService.v, false) and canBuild(K.WATER) then
-      placeServiceNear(K.WATER, needService.u, needService.v, entries)
+    if needService.water and not covered(own.water, needService.u, needService.v, false) then
+      if canBuild(K.WATER) then
+        placeServiceNear(K.WATER, needService.u, needService.v, entries)
+      else
+        st.warn = "Air: " .. lockReason(K.WATER)
+      end
     end
     if needService.energy and not covered(own.energy, needService.u, needService.v, false) then
       local gen = nextGenerator()
-      if gen then genPlaced = placeServiceNear(gen, needService.u, needService.v, entries) end
+      if gen then
+        genPlaced = placeServiceNear(gen, needService.u, needService.v, entries)
+      else
+        local reasons = {}
+        for _, g in ipairs(K.GENERATORS) do reasons[#reasons + 1] = lockReason(g) end
+        st.warn = "Listrik: tidak ada pembangkit yang bisa dibangun (" .. table.concat(reasons, "; ") .. ")"
+      end
     end
   end
   -- kapasitas listrik kurang -> tambah pembangkit (dekat area yang sedang dibangun)
