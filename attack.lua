@@ -203,7 +203,7 @@ local function buildPart(part, aim, used, entries)
 end
 
 -- ===== sasaran tersebar di kota musuh =====
--- Urutan: AD -> radar -> launcher rudal -> bangunan militer lain -> bangunan biasa. Jalan tidak dihitung.
+-- Urutan: AD -> radar -> launcher rudal -> semua bangunan lain dari yang termahal. Jalan tidak dihitung.
 -- Tiap gelombang mulai lagi dari atas daftar, jadi AD selalu kebagian duluan; 1 misil per bangunan,
 -- kalau misil lebih banyak dari bangunan, daftar diulang dari atas.
 local AD_TEMPLATES = {}
@@ -216,30 +216,43 @@ for _, a in ipairs(ALIASES) do for _, t in ipairs(a[2]) do LAUNCHER_TEMPLATES[t]
 for t in pairs(SEPARATE) do LAUNCHER_TEMPLATES[t] = true end
 local okCatalog, Catalog = pcall(function() return require(RS:WaitForChild("BuildCatalog", 5)) end)
 
-local function rankOf(template)
-  if AD_TEMPLATES[template] then return 1 end
-  if template == "Early Warning Radar" then return 2 end
-  if LAUNCHER_TEMPLATES[template] then return 3 end
+-- prioritas & harga: AD (1) -> radar (2) -> launcher (3) -> sisanya (4) dari yang TERMAHAL (harga BuildCatalog).
+-- Di dalam tiap prioritas juga yang termahal dulu (THAAD sebelum MANPADS). Jalan = nil (bukan sasaran).
+local costCache = {}
+local function catalogItem(template)
   local item = okCatalog and Catalog and Catalog.GetItemByTemplateName
     and select(2, pcall(Catalog.GetItemByTemplateName, template))
-  local category = type(item) == "table" and item.category
+  return type(item) == "table" and item or nil
+end
+local function rankOf(template)
+  local item = catalogItem(template)
+  local category = item and item.category
   if category == "Roads" or (not category and tostring(template):lower():find("road")) then return nil end
-  return category == "Military" and 4 or 5
+  if costCache[template] == nil then costCache[template] = tonumber(item and item.cost) or 0 end
+  local cost = costCache[template]
+  if AD_TEMPLATES[template] then return 1, cost end
+  if template == "Early Warning Radar" then return 2, cost end
+  if LAUNCHER_TEMPLATES[template] then return 3, cost end
+  return 4, cost
+end
+local function byPriority(a, b)
+  if a.rank ~= b.rank then return a.rank < b.rank end
+  if a.cost ~= b.cost then return a.cost > b.cost end
+  return a.name < b.name
 end
 
 local function enemyTargets(uid)
   local list = {}
   for _, b in ipairs(Placed:GetChildren()) do
     if b:IsA("Model") and b:GetAttribute("PlacementOwnerUserId") == uid and b:GetAttribute("Destroyed") ~= true then
-      local rank = rankOf(b:GetAttribute("RoadTemplateName"))
+      local rank, cost = rankOf(b:GetAttribute("RoadTemplateName"))
       local ok, cf = pcall(b.GetPivot, b)
-      if rank and ok then list[#list + 1] = { rank = rank, pos = cf.Position, name = b.Name, model = b } end
+      if rank and ok then
+        list[#list + 1] = { rank = rank, cost = cost, pos = cf.Position, name = b.Name, model = b }
+      end
     end
   end
-  table.sort(list, function(a, b)
-    if a.rank ~= b.rank then return a.rank < b.rank end
-    return a.name < b.name
-  end)
+  table.sort(list, byPriority)
   local nAd = 0
   for _, t in ipairs(list) do if t.rank == 1 then nAd = nAd + 1 end end
   return list, nAd
@@ -256,10 +269,7 @@ local function currentTargets(uid)
     if not gone and not seen[t.model] then list[#list + 1] = t end
   end
   for _, t in ipairs(live) do list[#list + 1] = t end
-  table.sort(list, function(a, b)
-    if a.rank ~= b.rank then return a.rank < b.rank end
-    return a.name < b.name
-  end)
+  table.sort(list, byPriority)
   return list
 end
 
