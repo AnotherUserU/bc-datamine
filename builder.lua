@@ -49,6 +49,12 @@ local K = {
   WATER = "Water Tower",
   GENERATORS = { "WindTurbine", "HauntedWindmill", "SolarPanel" },
   PENDING_TIME = 90,        -- detik: gedung baru dianggap masih memakan jatah listrik
+  VERIFY_TIME = 25,         -- detik: gedung yang dikirim dianggap "sedang diproses" sebelum dihitung ulang
+  MAX_ATTEMPTS = 3,         -- slot ditolak server sebanyak ini -> diblokir
+  STATE_FILE = "bc_build_state.json",
+  -- tahap 2A: industri steel (Mine maks mengikuti batas game, Steelworks dibanyakkan supaya cepat)
+  STEEL_QUOTA = { { "Mine", "max" }, { "SteelMill", 12 } },
+  UPGRADE_PER_TICK = 8,
 }
 
 local alive, running = true, false
@@ -122,6 +128,18 @@ local function footprint(t)
   return footCache[t][1], footCache[t][2]
 end
 
+local Http = game:GetService("HttpService")
+local state = { layout = {}, blocked = {} }
+local function saveState()
+  pcall(function() writefile(K.STATE_FILE, Http:JSONEncode(state)) end)
+end
+local function loadState()
+  local ok, data = pcall(function() return Http:JSONDecode(readfile(K.STATE_FILE)) end)
+  if ok and type(data) == "table" then
+    state.layout = type(data.layout) == "table" and data.layout or {}
+    state.blocked = type(data.blocked) == "table" and data.blocked or {}
+  end
+end
 -- ===== keadaan kota (dibaca ulang tiap putaran) =====
 local occ, roadSet, own = {}, {}, {}
 local pending = {}            -- { t, energy } gedung yang baru dikirim
@@ -132,8 +150,9 @@ local function markRect(u0, v0, w, d)
   end
 end
 local function readCity()
-  occ, roadSet, own = {}, {}, { count = {}, energy = {}, water = {}, globalWater = false }
+  occ, roadSet, own = {}, {}, { count = {}, energy = {}, water = {}, globalWater = false, models = {} }
   chunkMask = Chunks.GetPlayerMask(lp, plot)
+  for _, b in ipairs(state.blocked) do markRect(b[1], b[2], b[3], b[4]) end
   for _, m in ipairs(Placed:GetChildren()) do
     if m:IsA("Model") and m:GetAttribute("PlacementOwnerUserId") == lp.UserId then
       local t = m:GetAttribute("RoadTemplateName")
@@ -143,6 +162,8 @@ local function readCity()
         local u, v = toLocal(cf.Position)
         markRect(u - size.X / 2, v - size.Z / 2, size.X, size.Z)
         own.count[t] = (own.count[t] or 0) + 1
+        own.models[t] = own.models[t] or {}
+        table.insert(own.models[t], m)
         local it = item(t)
         local ready = m:GetAttribute("UnderConstruction") ~= true
         if it and it.kind == "Road" then roadSet[cellKey(math.floor(u + 0.5), math.floor(v + 0.5))] = true end
@@ -180,12 +201,21 @@ local function pendingEnergy()
   return sum
 end
 
+-- ===== tata letak per chunk (tersimpan di file, jadi bisa dilanjutkan) =====
+-- Tiap chunk punya jarak jalan mendatar (pitch) dan titik awal (origin v). Chunk yang sudah berisi bangunan
+-- tahap 1 memakai pola lama (pitch 14 dari v=0). Chunk baru mengikuti gedung pertama yang dipasang di sana:
+-- pitch = 2 x dalam gedung + 3, jadi dua baris gedung saling membelakangi dengan satu jalan di antaranya.
+local function chunkKey(cx, cz) return cx .. ":" .. cz end
+local function layoutAt(u, v)
+  local cx, cz = chunkOf(u, v)
+  return state.layout[chunkKey(cx, cz)] or { pitch = K.ROAD_PITCH, origin = 0 }
+end
+
 -- ===== jalan =====
--- jalan mendatar: pusat v = 14k+1 (pita v 14k..14k+2); jalan tegak: pusat u = 100m+1. Ubin 2x2, pusat ganjil.
+-- jalan mendatar: pusat v = origin + pitch*k + 1; jalan tegak: pusat u = 100m+1. Ubin 2x2, pusat ganjil.
 local function isRoadCell(u, v)
-  local rv = v % K.ROAD_PITCH
-  local ru = u % K.ROAD_V_PITCH
-  return rv < 2 or ru < 2
+  local L = layoutAt(u, v)
+  return (v - L.origin) % L.pitch < 2 or u % K.ROAD_V_PITCH < 2
 end
 local queueRoads = {}
 local function wantRoad(u, v)   -- u,v = pusat ubin (ganjil)
@@ -194,12 +224,12 @@ local function wantRoad(u, v)   -- u,v = pusat ubin (ganjil)
   queueRoads[key] = { u = u, v = v }
 end
 -- pastikan jalan di sekitar blok (u0..u1) pada pita atas & bawah blok k, plus jalan tegak terdekat
-local function ensureRoadsFor(u0, u1, k)
-  for _, bandV in ipairs({ K.ROAD_PITCH * k + 1, K.ROAD_PITCH * (k + 1) + 1 }) do
+local function ensureRoadsFor(u0, u1, k, L)
+  for _, bandV in ipairs({ L.origin + L.pitch * k + 1, L.origin + L.pitch * (k + 1) + 1 }) do
     for u = math.floor((u0 - 4) / 2) * 2 + 1, u1 + 4, 2 do wantRoad(u, bandV) end
   end
   local vu = math.floor(u0 / K.ROAD_V_PITCH) * K.ROAD_V_PITCH + 1
-  for v = K.ROAD_PITCH * k + 1, K.ROAD_PITCH * (k + 1) + 1, 2 do wantRoad(vu, v) end
+  for v = L.origin + L.pitch * k + 1, L.origin + L.pitch * (k + 1) + 1, 2 do wantRoad(vu, v) end
 end
 
 -- ===== mencari tempat =====
@@ -211,9 +241,10 @@ local function freeRect(u0, v0, w, d)
   end
   return true
 end
--- baris-baris yang dekat jalan untuk gedung sedalam d di blok k (v dari 14k+2 sampai 14k+14)
-local function rowsInBlock(k, d)
-  local top, bottom, rows, seen = K.ROAD_PITCH * k + 2, K.ROAD_PITCH * (k + 1), {}, {}
+-- baris-baris yang dekat jalan untuk gedung sedalam d di blok k
+local function rowsInBlock(k, d, L)
+  L = L or { pitch = K.ROAD_PITCH, origin = 0 }
+  local top, bottom, rows, seen = L.origin + L.pitch * k + 2, L.origin + L.pitch * (k + 1), {}, {}
   if d > bottom - top then return rows end
   local v = top
   while v + d <= bottom and v - top <= K.ROAD_REACH do
@@ -245,19 +276,45 @@ local function yieldSometimes()   -- loop pencarian panjang: beri jeda supaya ga
   scanSteps = scanSteps + 1
   if scanSteps % 3000 == 0 then task.wait() end
 end
+-- chunk belum punya tata letak: kalau sudah ada bangunan/jalan di sana pakai pola lama, kalau kosong
+-- pakai pitch yang pas untuk gedung sedalam d (dicatat & disimpan)
+local function chunkHasStuff(cu0, cv0, size)
+  for u = cu0, cu0 + size - 1, 2 do
+    for v = cv0, cv0 + size - 1, 2 do
+      if occ[cellKey(u, v)] then return true end
+    end
+  end
+  return false
+end
+local function layoutForChunk(c, cu0, cv0, size, d)
+  local key = chunkKey(c.x, c.z)
+  if state.layout[key] then return state.layout[key] end
+  local L
+  if chunkHasStuff(cu0, cv0, size) then
+    L = { pitch = K.ROAD_PITCH, origin = 0 }
+  else
+    L = { pitch = math.max(K.ROAD_PITCH, 2 * d + 3), origin = cv0 }
+  end
+  state.layout[key] = L
+  saveState()
+  note("tata letak chunk (%d,%d): jalan tiap %d stud", c.x, c.z, L.pitch)
+  return L
+end
 local function slots(w, d, maxCount)
   local out, size = {}, plot.Size.X / Chunks.GridSize
   for _, c in ipairs(chunkOrder()) do
     local cu0, cv0 = (c.x - 1) * size, (c.z - 1) * size
-    if unlocked(cu0 + 1, cv0 + 1) then
-      for k = math.floor(cv0 / K.ROAD_PITCH), math.floor((cv0 + size) / K.ROAD_PITCH) do
-        for _, v0 in ipairs(rowsInBlock(k, d)) do
+    local L = unlocked(cu0 + 1, cv0 + 1) and (state.layout[chunkKey(c.x, c.z)]
+      or layoutForChunk(c, cu0, cv0, size, d))
+    if L and d <= L.pitch - 2 then
+      for k = math.floor((cv0 - L.origin) / L.pitch), math.floor((cv0 + size - L.origin) / L.pitch) do
+        for _, v0 in ipairs(rowsInBlock(k, d, L)) do
           if v0 >= cv0 and v0 + d <= cv0 + size then
             local u = cu0
             while u + w <= cu0 + size do
               yieldSometimes()
               if freeRect(u, v0, w, d) then
-                out[#out + 1] = { u0 = u, v0 = v0, k = k }
+                out[#out + 1] = { u0 = u, v0 = v0, k = k, L = L }
                 if #out >= maxCount then return out end
                 u = u + w + K.GAP
               else
@@ -294,12 +351,38 @@ local function flushRoads()
     note("jalan: %d ubin", #list)
   end
 end
-local function place(t, slot, w, d, entries)
+-- tapak yang dipakai: sisi panjang sejajar jalan (diputar 90 derajat kalau perlu) supaya blok tidak terlalu dalam
+local function orient(t)
+  local w, d = footprint(t)
+  if not w then return nil end
+  if d > w then return d, w, 90 end
+  return w, d, 0
+end
+-- slot yang gagal berkali-kali (server menolak) diblokir & disimpan, supaya tidak dicoba terus
+local attempts = {}
+local function place(t, slot, w, d, entries, rot)
+  local key = ("%s@%d:%d"):format(t, slot.u0, slot.v0)
+  attempts[key] = (attempts[key] or 0) + 1
   markRect(slot.u0, slot.v0, w + K.GAP, d + K.GAP)
-  ensureRoadsFor(slot.u0, slot.u0 + w, slot.k)
-  entries[#entries + 1] = { t = t, p = toWorld(slot.u0 + w / 2, slot.v0 + d / 2), r = 0 }
+  if attempts[key] > K.MAX_ATTEMPTS then
+    state.blocked[#state.blocked + 1] = { slot.u0, slot.v0, w, d }
+    saveState()
+    note("slot (%d,%d) untuk %s ditolak %d kali, dilewati", slot.u0, slot.v0, t, K.MAX_ATTEMPTS)
+    return false
+  end
+  ensureRoadsFor(slot.u0, slot.u0 + w, slot.k, slot.L or layoutAt(slot.u0, slot.v0))
+  entries[#entries + 1] = { t = t, p = toWorld(slot.u0 + w / 2, slot.v0 + d / 2), r = rot or 0 }
   local it = item(t)
-  pending[#pending + 1] = { at = os.clock(), energy = it and it.energyDemand or 0 }
+  pending[#pending + 1] = { at = os.clock(), t = t, energy = it and it.energyDemand or 0,
+    workers = it and it.workersRequired or 0 }
+  return true
+end
+local function pendingOf(t, field)
+  local now, n = os.clock(), 0
+  for _, p in ipairs(pending) do
+    if now - p.at < K.VERIFY_TIME and (not t or p.t == t) then n = n + (field and p[field] or 1) end
+  end
+  return n
 end
 
 -- ===== layanan: air & listrik =====
@@ -320,15 +403,14 @@ local function nextGenerator()
 end
 -- pasang satu layanan sedekat mungkin ke titik (u,v) yang butuh jangkauan
 local function placeServiceNear(t, u, v, entries)
-  local w, d = footprint(t)
+  local w, d, rot = orient(t)
   if not w then return false end
   local best, bestD
   for _, s in ipairs(slots(w, d, 400)) do
     local dist = (s.u0 + w / 2 - u) ^ 2 + (s.v0 + d / 2 - v) ^ 2
     if not bestD or dist < bestD then best, bestD = s, dist end
   end
-  if not best then return false end
-  place(t, best, w, d, entries)
+  if not best or not place(t, best, w, d, entries, rot) then return false end
   own.count[t] = (own.count[t] or 0) + 1
   local it = item(t)
   local list = (it.waterSupplyRange or 0) > 0 and own.water or own.energy
@@ -432,57 +514,38 @@ local function buyChunks()
   note("chunk terbuka: %d/%d", Chunks.GetUnlockedCount(Chunks.GetPlayerMask(lp, plot)), Chunks.ChunkCount)
 end
 
--- ===== satu putaran =====
-local function tick()
-  st.status, st.warn = "Membaca kota...", ""
-  readCity()
-  local level = stat("CityLevel")
-  st.stats = ("Level %d | Populasi %d | Penghuni rumah %s | Listrik sisa %d | Gedung %d")
-    :format(level, stat("Population"), tostring(lp:GetAttribute("HouseResidents") or 0), stat("EnergyAvailable"),
-      (function() local n = 0 for _, c in pairs(own.count) do n = n + c end return n end)())
-  if level >= K.TARGET_LEVEL then
-    st.status = "City level 5 tercapai. Tahap 1 selesai."
-    running = false
-    return
-  end
-  local entries = {}
-  local sx, sz = Chunks.GetStartChunk(plot)
-  local csize = plot.Size.X / Chunks.GridSize
-  local homeU, homeV = (sx - 0.5) * csize, (sz - 0.5) * csize   -- tengah chunk awal
-  -- air: citizen support kurang -> tambah Water Tower
-  local unsupported = tonumber(lp:GetAttribute("UnsupportedCitizens")) or 0
-  if unsupported > 0 and canBuild(K.WATER) then
-    placeServiceNear(K.WATER, homeU, homeV, entries)
-  end
-  local t = targetHousing()
-  if not t then
-    st.status = "Belum ada hunian yang terbuka. " .. lockReason(K.HOUSE)
-    return
-  end
+-- ===== pasang satu jenis gedung (dipakai semua tahap) =====
+-- Hanya di slot yang sudah terjangkau air & listrik yang SELESAI dibangun, dalam jatah listrik & pekerja.
+-- Kalau area belum terjangkau, pasang Water Tower / pembangkit di dekatnya dulu.
+local function buildTemplate(t, want, entries, home)
   local it = item(t)
   st.status = "Membaca ukuran " .. tostring(t) .. "..."
-  local w, d = footprint(t)
+  local w, d, rot = orient(t)
   if not (it and w) then
     st.status = "Tidak bisa membaca ukuran " .. tostring(t)
-    return
+    return 0
   end
   local energyLeft = stat("EnergyAvailable") - pendingEnergy() - K.ENERGY_MARGIN
-  local budget = it.energyDemand and it.energyDemand > 0 and math.floor(energyLeft / it.energyDemand) or K.BATCH
+  local budget = (it.energyDemand or 0) > 0 and math.floor(energyLeft / it.energyDemand) or K.BATCH
+  local needWorkers = it.workersRequired or 0
+  if needWorkers > 0 then
+    local workersLeft = stat("WorkersAvailable") - pendingOf(nil, "workers")
+    budget = math.min(budget, math.floor(workersLeft / needWorkers))
+  end
+  local limit = math.min(K.BATCH, want)
   local placedN, needService, genPlaced = 0, nil, false
   st.status = ("Mencari tempat %s (%dx%d)..."):format(t, w, d)
-  for _, s in ipairs(slots(w, d, K.BATCH * 3)) do
-    if placedN >= math.min(K.BATCH, budget) then break end
+  for _, s in ipairs(slots(w, d, limit * 3)) do
+    if placedN >= math.min(limit, budget) then break end
     local cu, cv = s.u0 + w / 2, s.v0 + d / 2
     local needWater = it.waterRequired and not own.globalWater and not covered(own.water, cu, cv, true)
     local needEnergy = (it.energyDemand or 0) > 0 and not covered(own.energy, cu, cv, true)
     if needWater or needEnergy then
       needService = needService or { water = needWater, energy = needEnergy, u = cu, v = cv }
-    else
-      place(t, s, w, d, entries)
+    elseif place(t, s, w, d, entries, rot) then
       placedN = placedN + 1
     end
   end
-  -- layanan untuk area yang belum terjangkau (hanya kalau belum ada yang sedang dibangun di sana)
   if needService then
     if needService.water and not covered(own.water, needService.u, needService.v, false) then
       if canBuild(K.WATER) then
@@ -502,27 +565,148 @@ local function tick()
       end
     end
   end
-  -- kapasitas listrik kurang -> tambah pembangkit (dekat area yang sedang dibangun)
-  if budget < K.BATCH / 4 and not genPlaced and #pending < K.BATCH then
+  -- listrik kurang -> tambah pembangkit dekat area yang sedang dibangun
+  if budget < math.min(limit, K.BATCH / 4) and not genPlaced and #pending < K.BATCH
+    and (it.energyDemand or 0) > 0 and stat("EnergyAvailable") - pendingEnergy() < it.energyDemand * 4 then
     local gen = nextGenerator()
     if gen then
-      placeServiceNear(gen, needService and needService.u or homeU, needService and needService.v or homeV, entries)
+      placeServiceNear(gen, needService and needService.u or home.u, needService and needService.v or home.v, entries)
     else
       st.warn = "Pembangkit habis (Wind maks, Haunted/Solar tidak tersedia)."
     end
   end
+  -- pekerja kurang -> tambah apartemen (pekerja datang dari penduduk)
+  if needWorkers > 0 and budget <= 0 and stat("EnergyAvailable") - pendingEnergy() > K.ENERGY_MARGIN * 4 then
+    local apt = bestApartment()
+    if apt and apt ~= t then
+      st.warn = "Pekerja kurang untuk " .. t .. ", tambah apartemen " .. apt
+      return buildTemplate(apt, K.BATCH, entries, home)
+    end
+  end
+  return placedN
+end
+
+-- ===== tahap 2A: upgrade Mine & Steelworks sampai maksimal =====
+local upgradeAt = {}
+local function upgradeIndustry()
+  local remotes = RS:FindFirstChild("MineRemotes")
+  if not remotes then return 0, 0 end
+  local plan = {
+    { t = "Mine", remote = remotes:FindFirstChild("UpgradeMine"), level = "MineUpgradeLevel",
+      max = item("Mine") and item("Mine").mineMaxUpgradeLevel or 5 },
+    { t = "SteelMill", remote = remotes:FindFirstChild("UpgradeSteelworks"), level = "SteelUpgradeLevel",
+      max = item("SteelMill") and item("SteelMill").steelMaxUpgradeLevel or 10 },
+  }
+  local sent, notMax, now = 0, 0, os.clock()
+  for _, p in ipairs(plan) do
+    for _, m in ipairs(own.models[p.t] or {}) do
+      local lvl = tonumber(m:GetAttribute(p.level)) or 0
+      local max = tonumber(m:GetAttribute("MineMaxUpgradeLevel")) or p.max
+      if p.t == "SteelMill" then max = p.max end
+      if lvl < max then
+        notMax = notMax + 1
+        if p.remote and m:GetAttribute("UnderConstruction") ~= true and sent < K.UPGRADE_PER_TICK
+          and now - (upgradeAt[m] or 0) > 5 then
+          upgradeAt[m] = now
+          if pcall(p.remote.FireServer, p.remote, m) then sent = sent + 1 end
+        end
+      end
+    end
+  end
+  return sent, notMax
+end
+local upgradeMsg
+do
+  local remotes = RS:FindFirstChild("MineRemotes")
+  local result = remotes and remotes:FindFirstChild("UpgradeResult")
+  if result then
+    table.insert(conns, result.OnClientEvent:Connect(function(ok, msg)
+      if not ok and msg then upgradeMsg = tostring(msg) end
+    end))
+  end
+end
+
+-- ===== kuota & progres =====
+local function quotaTarget(t, want)
+  if want == "max" then return limitOf(t) or 0 end
+  local lim = limitOf(t)
+  return lim and math.min(lim, want) or want
+end
+-- progres tahap dalam persen + daftar yang belum penuh
+local function quotaProgress(quota)
+  local doneSum, wantSum, nextT, nextWant, parts = 0, 0, nil, 0, {}
+  for _, q in ipairs(quota) do
+    local t, target = q[1], quotaTarget(q[1], q[2])
+    local have = own.count[t] or 0
+    doneSum, wantSum = doneSum + math.min(have, target), wantSum + target
+    parts[#parts + 1] = ("%s %d/%d"):format(t, have, target)
+    local remaining = target - have - pendingOf(t)
+    if not nextT and remaining > 0 and canBuild(t) then nextT, nextWant = t, remaining end
+  end
+  return wantSum > 0 and doneSum / wantSum or 1, nextT, nextWant, table.concat(parts, ", ")
+end
+
+-- ===== satu putaran =====
+local function tick()
+  st.status, st.warn = "Membaca kota...", ""
+  readCity()
+  local level = stat("CityLevel")
+  local total = 0
+  for _, c in pairs(own.count) do total = total + c end
+  local entries = {}
+  local sx, sz = Chunks.GetStartChunk(plot)
+  local csize = plot.Size.X / Chunks.GridSize
+  local home = { u = (sx - 0.5) * csize, v = (sz - 0.5) * csize }   -- tengah chunk awal
+  local unsupported = tonumber(lp:GetAttribute("UnsupportedCitizens")) or 0
+  if unsupported > 0 and canBuild(K.WATER) then placeServiceNear(K.WATER, home.u, home.v, entries) end
+  local phaseText, placedT, placedN
+  if level < K.TARGET_LEVEL then
+    -- tahap 1: naik ke city level 5
+    local pct = math.min(1, stat("Population") / 20000)
+    phaseText = ("Tahap 1 (city 5): %d%%"):format(math.floor(pct * 100))
+    placedT = targetHousing()
+    if not placedT then
+      st.status = "Belum ada hunian yang terbuka. " .. lockReason(K.HOUSE)
+      return
+    end
+    placedN = buildTemplate(placedT, K.BATCH, entries, home)
+  else
+    -- tahap 2A: industri steel lalu upgrade
+    local pct, nextT, nextWant, parts = quotaProgress(K.STEEL_QUOTA)
+    local upSent, notMax = upgradeIndustry()
+    local upTotal = 0
+    for _, q in ipairs(K.STEEL_QUOTA) do upTotal = upTotal + (own.count[q[1]] or 0) end
+    local upPct = upTotal > 0 and (upTotal - notMax) / upTotal or 0
+    local overall = math.floor((pct * 0.7 + upPct * 0.3) * 100)
+    phaseText = ("Tahap 2A (steel): %d%% | %s | upgrade maks %d/%d"):format(overall, parts, upTotal - notMax, upTotal)
+    if upSent > 0 then note("upgrade industri: %d permintaan", upSent) end
+    if nextT then
+      placedT = nextT
+      placedN = buildTemplate(nextT, nextWant, entries, home)
+    elseif notMax == 0 and upTotal > 0 then
+      st.stats = phaseText
+      st.status = "Tahap 2A selesai: Mine & Steelworks penuh dan upgrade maksimal."
+      running = false
+      return
+    end
+  end
+  st.stats = ("%s\nLevel %d | Populasi %d | Listrik sisa %d | Pekerja sisa %d | Gedung %d"):format(phaseText, level,
+    stat("Population"), stat("EnergyAvailable"), stat("WorkersAvailable"), total)
   flushRoads()
   if #entries > 0 then
     send(entries)
-    note("kirim %d (%s x%d), listrik sisa %d", #entries, t, placedN, stat("EnergyAvailable"))
+    note("kirim %d (%s x%d), listrik sisa %d", #entries, tostring(placedT), placedN or 0, stat("EnergyAvailable"))
   end
-  st.status = ("Membangun %s. %s"):format(t, placedN == 0 and "Menunggu listrik/air selesai dibangun..." or "")
+  if upgradeMsg then st.warn = "Upgrade: " .. upgradeMsg upgradeMsg = nil end
+  st.status = placedT and ("Membangun %s. %s"):format(placedT,
+    (placedN or 0) == 0 and "Menunggu listrik/air/pekerja..." or "") or "Menunggu upgrade selesai..."
 end
 
 local function runLoop()
   plot = PlotUtil.GetOwnedPlot(lp.UserId)
   if not plot then st.status = "Plot tidak ditemukan." running = false return end
   half = plot.Size * 0.5
+  loadState()   -- tata letak chunk & slot yang diblokir dari sesi sebelumnya
   note("mulai. plot %s, ukuran %.0f", tostring(plot.Position), plot.Size.X)
   buyChunks()
   note("putaran bangun dimulai")
