@@ -3,7 +3,8 @@
 --   99 shahed 136
 --   40 cruise + 59 karrar
 -- Peluncuran memakai remote game yang sama dengan tombol FIRE (MissileRemotes.LaunchMissileVolley),
--- hanya launcher milik sendiri yang siap (tidak reload, ada stok). Maks 100 target per barrage (batas game).
+-- hanya launcher milik sendiri yang siap (tidak reload, ada stok). Maks 99 target per barrage; sisanya
+-- langsung dikirim sebagai barrage berikutnya, baru lanjut ke baris di bawahnya.
 -- Tombol "-" menyembunyikan panel; klik tab "ATTACK" untuk memunculkan lagi.
 if game.GameId ~= 10757247806 then return end
 local G = (getgenv and getgenv()) or _G
@@ -27,7 +28,7 @@ local Placed = workspace:WaitForChild("PlacedRoads")
 local K = {
   PLAN_FILE = "bc_attack_plan.txt",
   DEFAULT_PLAN = "99 shahed 136\n99 shahed 236\n40 cruise + 59 karrar\n5 cluster + 40 mrbm + 59 srbm\n12 hypers",
-  BARRAGE_LIMIT = 100,     -- target per FireServer (batas barrage normal game)
+  BARRAGE_LIMIT = 99,      -- target per FireServer (game menolak target ke-101; 99 biar aman)
   CHUNK_GAP = 0.3,         -- detik antar-potongan kalau satu gelombang > 100
   DEFAULT_GAP = 3,         -- detik antar-gelombang
 }
@@ -42,18 +43,27 @@ local ALIASES = {
   { "shahed", { "Shahed Launcher" } },
   { "karrar", { "Karrar Launcher" } },
   { "geran", { "Geran-5 Launcher" } },
-  { "cruise", { "FP-5 Flamingo Launcher", "GLCM Launcher", "MdCN Launcher" } },
+  -- Standard pack: cruise = GLCM (Tomahawk, 4 misil per launcher), hyper = Hypersonic BM
+  { "cruise", { "GLCM Launcher" } },
   { "tomahawk", { "GLCM Launcher" } },
   { "glcm", { "GLCM Launcher" } },
-  { "flamingo", { "FP-5 Flamingo Launcher" } },
-  { "mdcn", { "MdCN Launcher" } },
   { "cluster", { "ClusterBMLauncher" } },
   { "heavymrbm", { "HeavyMRBMLauncher" } },
+  { "hvmrbm", { "HeavyMRBMLauncher" } },
   { "mrbm", { "MRBMLauncher" } },
   { "srbm", { "SRBMLauncher" } },
-  { "iskander", { "IskanderLauncher" } },
   { "hyper", { "Hypersonic BM Launcher" } },
+  { "asbm", { "ASBMLauncher" } },        -- anti-kapal: target harus kapal musuh
+  { "coastal", { "CoastalLauncher" } },  -- Yakhont, anti-kapal
+  { "yakhont", { "CoastalLauncher" } },
+  -- pack lain (Russia / France / USA), hanya kalau ditulis namanya
+  { "flamingo", { "FP-5 Flamingo Launcher" } },
+  { "fp5", { "FP-5 Flamingo Launcher" } },
+  { "mdcn", { "MdCN Launcher" } },
+  { "iskander", { "IskanderLauncher" } },
   { "zircon", { "Zircon Launcher" } },
+  { "pelican", { "FP9 Pelican Launcher" } },
+  { "hades", { "Hades Launcher" } },
 }
 -- launcher yang tiap misilnya jadi entri sendiri (sama seperti fireBarrage di game)
 local SEPARATE = {
