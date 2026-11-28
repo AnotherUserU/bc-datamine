@@ -13,6 +13,7 @@ if G.BC_ATTACK then pcall(G.BC_ATTACK.stop) G.BC_ATTACK = nil end
 local GUI_PARENT = (gethui and gethui()) or game:GetService("CoreGui")
 local RUN_ID = ("%04x"):format(math.random(0, 0xffff))
 GUI_PARENT:SetAttribute("BCAttackRun", RUN_ID)
+G.BCAttackRun = RUN_ID   -- dicek dari thread tombol: thread itu tidak boleh menyentuh gethui (capability)
 for _, old in ipairs(GUI_PARENT:GetChildren()) do
   if old.Name == "BCAttack" then old:Destroy() end
 end
@@ -106,7 +107,7 @@ local conns = {}
 local st = { target = nil, picking = false, loop = true, navy = true, repair = true,
   status = "Pilih target dulu.", log = {}, serverMsg = "", repairMsg = "" }
 
-local function current() return alive and GUI_PARENT:GetAttribute("BCAttackRun") == RUN_ID end
+local function current() return alive and G.BCAttackRun == RUN_ID end
 local function note(msg)
   table.insert(st.log, 1, os.date("%H:%M:%S ") .. msg)
   while #st.log > 8 do table.remove(st.log) end

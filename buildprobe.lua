@@ -109,8 +109,8 @@ local function listen()
   local placed = remotes and remotes:FindFirstChild("RoadPlaced")
   if placed then
     table.insert(conns, placed.OnClientEvent:Connect(function(...)
-      local args = { ... }
-      for i, a in ipairs(args) do args[i] = flat(a) end
+      local args = {}
+      for i = 1, select("#", ...) do args[i] = flat((select(i, ...))) end   -- argumen bisa nil
       out("RoadPlaced <- %s", table.concat(args, " | "))
     end))
   end

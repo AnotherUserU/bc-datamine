@@ -14,6 +14,7 @@ if G.BC_LOADTEST then pcall(G.BC_LOADTEST.stop) G.BC_LOADTEST = nil end
 local GUI_PARENT = (gethui and gethui()) or game:GetService("CoreGui")
 local RUN_ID = ("%04x"):format(math.random(0, 0xffff))
 GUI_PARENT:SetAttribute("BCLoadTestRun", RUN_ID)
+G.BCLoadTestRun = RUN_ID   -- dicek dari thread tombol: thread itu tidak boleh menyentuh gethui (capability)
 for _, old in ipairs(GUI_PARENT:GetChildren()) do
   if old.Name == "BCLoadTest" then old:Destroy() end
 end
@@ -45,7 +46,7 @@ local results = {}           -- per fase: { flights = n, intercepts = { id... } 
 local phaseIdx, phaseEnd, statusText = 0, 0, "Siap. Tekan MULAI lalu jangan sentuh game."
 local savedCam
 
-local function current() return alive and GUI_PARENT:GetAttribute("BCLoadTestRun") == RUN_ID end
+local function current() return alive and G.BCLoadTestRun == RUN_ID end
 local function log(msg)
   local line = os.date("%H:%M:%S") .. " " .. msg .. "\n"
   pcall(function()

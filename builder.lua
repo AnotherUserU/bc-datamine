@@ -16,6 +16,7 @@ if G.BC_BUILDER then pcall(G.BC_BUILDER.stop) G.BC_BUILDER = nil end
 local GUI_PARENT = (gethui and gethui()) or game:GetService("CoreGui")
 local RUN_ID = ("%04x"):format(math.random(0, 0xffff))
 GUI_PARENT:SetAttribute("BCBuilderRun", RUN_ID)
+G.BCBuilderRun = RUN_ID   -- dicek dari thread tombol: thread itu tidak boleh menyentuh gethui (capability)
 for _, old in ipairs(GUI_PARENT:GetChildren()) do
   if old.Name == "BCBuilder" then old:Destroy() end
 end
@@ -53,7 +54,7 @@ local K = {
 local alive, running = true, false
 local conns = {}
 local st = { status = "Siap. Plot harus kosong / sesuai rencana. Tekan MULAI.", log = {}, warn = "", stats = "" }
-local function current() return alive and GUI_PARENT:GetAttribute("BCBuilderRun") == RUN_ID end
+local function current() return alive and G.BCBuilderRun == RUN_ID end
 local logLines = {}
 local function note(fmt, ...)
   local ok, s = pcall(string.format, fmt, ...)
