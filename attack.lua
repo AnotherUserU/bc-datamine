@@ -183,30 +183,42 @@ local function buildPart(part, point, used, entries)
   return got
 end
 
-local function fireEntries(entries)
-  local i = 1
-  while i <= #entries and current() and running do
-    local chunk = {}
-    for j = i, math.min(i + K.BARRAGE_LIMIT - 1, #entries) do chunk[#chunk + 1] = entries[j] end
-    Volley:FireServer(chunk)
-    i = i + K.BARRAGE_LIMIT
-    if i <= #entries then task.wait(K.CHUNK_GAP) end
-  end
+-- kirim entries[from..to] sebagai satu barrage
+local function sendBarrage(entries, from, to)
+  local chunk = {}
+  for j = from, to do chunk[#chunk + 1] = entries[j] end
+  local ok, err = pcall(Volley.FireServer, Volley, chunk)
+  if not ok then note("GAGAL kirim: " .. tostring(err)) return 0 end
+  return #chunk
 end
 
-local function fireWave(index, wave, point)
-  local entries, used, summary = {}, {}, {}
+-- Satu gelombang: sisa gelombang sebelumnya (carry) + launcher gelombang ini.
+-- Tembak per 99. Kalau totalnya lewat 99, sisanya TIDAK ditembak sendiri tapi ikut barrage gelombang
+-- berikutnya (contoh: 104 -> 99 sekarang, 5 ikut 12 hypers = 17). Gelombang terakhir menembak semuanya.
+local function fireWave(index, wave, point, used, carry, isLast)
+  local entries, summary = carry, {}
+  local fromCarry = #carry
   for _, part in ipairs(wave.parts) do
     local got = buildPart(part, point, used, entries)
     summary[#summary + 1] = ("%s %d/%d"):format(part.name, got, part.count)
   end
-  if #entries == 0 then
-    note(("G%d: tidak ada launcher siap (%s)"):format(index, table.concat(summary, ", ")))
-    return 0
+  local limit, sent, i = K.BARRAGE_LIMIT, 0, 1
+  local overflow = #entries > limit
+  while #entries - i + 1 >= limit and current() and running do
+    sent = sent + sendBarrage(entries, i, i + limit - 1)
+    i = i + limit
+    if #entries - i + 1 > 0 then task.wait(K.CHUNK_GAP) end
   end
-  local ok, err = pcall(fireEntries, entries)
-  note(("G%d %s: %s"):format(index, ok and "terkirim" or "GAGAL", ok and table.concat(summary, ", ") or tostring(err)))
-  return ok and #entries or 0
+  local rest, nextCarry = #entries - i + 1, {}
+  if rest > 0 and overflow and not isLast then
+    for j = i, #entries do nextCarry[#nextCarry + 1] = entries[j] end
+  elseif rest > 0 and current() and running then
+    sent = sent + sendBarrage(entries, i, #entries)
+  end
+  note(("G%d: %s | tembak %d%s%s"):format(index, table.concat(summary, ", "), sent,
+    fromCarry > 0 and (" (+%d sisa sebelumnya)"):format(fromCarry) or "",
+    #nextCarry > 0 and (", %d ikut gelombang berikut"):format(#nextCarry) or ""))
+  return sent, nextCarry
 end
 
 -- satu putaran = semua baris dari atas ke bawah. Mode ulang: putar terus sampai BERHENTI ditekan.
@@ -214,12 +226,14 @@ local function runPlan(waves, gap)
   local point, round = st.target, 0
   repeat
     round = round + 1
-    local fired = 0
+    local fired, used, carry = 0, {}, {}   -- used: launcher yang sudah dipakai di putaran ini
     for i, wave in ipairs(waves) do
       if not (current() and running) then break end
       st.status = ("Putaran %d, gelombang %d/%d: %s"):format(round, i, #waves, wave.text)
-      fired = fired + fireWave(i, wave, point)
-      if i < #waves or st.loop then task.wait(gap) end
+      local sent
+      sent, carry = fireWave(i, wave, point, used, carry, i == #waves)
+      fired = fired + sent
+      if sent > 0 and (i < #waves or st.loop) then task.wait(gap) end
     end
     if st.loop and fired == 0 and current() and running then
       st.status = ("Putaran %d: semua launcher reload, tunggu %d dtk..."):format(round, K.IDLE_WAIT)
