@@ -1127,6 +1127,12 @@ local function validWebhook(url)
     or url:match("^https://discordapp%.com/api/webhooks/%d+/[%w_%-]+$") ~= nil
     or url:match("^https://%a+%.discord%.com/api/webhooks/%d+/[%w_%-]+$") ~= nil
 end
+-- Ambil URL webhook dari teks yang ditempel (copy-paste di HP/emulator bisa membawa karakter tak terlihat atau
+-- teks lain di sekitarnya), lalu samakan ke bentuk baku https://discord.com/api/webhooks/<id>/<token>.
+local function extractWebhook(text)
+  local id, token = tostring(text):match("discord%w*%.com/api/webhooks/(%d+)/([%w_%-]+)")
+  return id and ("https://discord.com/api/webhooks/%s/%s"):format(id, token) or nil
+end
 -- Kunci: hub hanya jalan dengan URL webhook pemilik. Yang disimpan di script hanya hash-nya (FNV-1a 32 bit, dua arah),
 -- jadi repo publik tidak membocorkan URL. Ini kunci ringan: source tetap bisa dibaca/diubah orang.
 K.KEY_HASH = "fbf0ad5c9bbc9cb0"
@@ -1141,6 +1147,7 @@ end
 local function isKey(url)
   return validWebhook(url) and ("%08x%08x"):format(fnv(url), fnv(url:reverse())) == K.KEY_HASH
 end
+hook.url = extractWebhook(hook.url) or hook.url   -- file lama bisa berisi karakter tak terlihat
 local unlocked = isKey(hook.url)
 if hook.url ~= "" then hook.status = unlocked and "Siap" or "URL tersimpan bukan kunci yang benar" end
 
@@ -1270,7 +1277,7 @@ K.SHUF_HOOK_FILE = "bc_hub_shufhook.txt"
 K.OWNER_REPORT_EVERY = 1800   -- detik; ringkasan total PP terpakai selama auto shuffle menyala
 shuf.hook = ""
 pcall(function()
-  if isfile(K.SHUF_HOOK_FILE) then shuf.hook = readfile(K.SHUF_HOOK_FILE):gsub("%s", "") end
+  if isfile(K.SHUF_HOOK_FILE) then shuf.hook = extractWebhook(readfile(K.SHUF_HOOK_FILE)) or "" end
 end)
 ownerNotify = function(text)
   if not httpRequest or not validWebhook(shuf.hook) then return end
@@ -1507,16 +1514,32 @@ do
   end)
   ui.shufStatus = textLine(pg)
   local hookBox = input(pg, "Webhook kabar shuffle", "https://discord.com/api/webhooks/...", function(box)
-    local url = box.Text:gsub("%s", "")
+    local raw = box.Text
     box.Text = ""
-    if url == "" then return end
-    if not validWebhook(url) then shuf.err = "Webhook kabar shuffle tidak valid" return end
-    shuf.hook, shuf.err = url, ""
-    pcall(writefile, K.SHUF_HOOK_FILE, url)
-    log("SHUF", "webhook kabar shuffle disimpan")
+    if raw:gsub("%s", "") == "" then return end
+    local url = extractWebhook(raw)
+    if not url then
+      shuf.hookMsg = ("Tidak ditemukan URL webhook di teks yang ditempel (%d karakter). Salin ulang dari "
+        .. "Discord: Edit Channel > Integrations > Webhooks > Copy Webhook URL."):format(#raw)
+      return
+    end
+    shuf.hook = url
+    local ok, err = pcall(writefile, K.SHUF_HOOK_FILE, url)
+    shuf.hookMsg = ok and "Tersimpan. Tekan Tes kirim untuk memastikan." or ("Gagal menyimpan: " .. tostring(err))
+    log("SHUF", "webhook kabar shuffle " .. (ok and "disimpan" or "gagal disimpan"))
   end)
   hookBox.TextTruncate = Enum.TextTruncate.AtEnd
   ui.shufHook = textLine(pg, C.muted)
+  ui.shufHookTest = button(pg, function()
+    if not validWebhook(shuf.hook) then shuf.hookMsg = "Isi webhook dulu." return end
+    shuf.hookMsg = "Mengirim pesan tes..."
+    task.spawn(function()
+      local ok, err = pcall(post, ("Tes kabar shuffle dari %s: webhook berfungsi."):format(lp.Name), {}, shuf.hook)
+      shuf.hookMsg = ok and ("Tes terkirim " .. os.date("%H:%M:%S") .. ". Cek channel Discord.")
+        or ("Tes GAGAL: " .. redact(err))
+    end)
+  end)
+  ui.shufHookTest.Text = ">> Tes kirim ke webhook shuffle"
   ui.shufStats = textLine(pg, C.muted)
   ui.shufErr = textLine(pg, C.red)
   textLine(pg, C.muted).Text = "Pool sekarang:"
@@ -1536,8 +1559,8 @@ do
   textLine(pg, C.muted).Text = "Log aktivitas: folder " .. HUB_DIR .. "/ (1 file per kategori per sesi). Log perang: folder "
     .. COMBAT_DIR .. "/ (1 file per sesi). Rejoin = file baru. Kirim hanya mengirim file / bagian yang belum terkirim."
   local urlBox = input(pg, "URL webhook", "https://discord.com/api/webhooks/...", function(box)
-    local url = box.Text:gsub("%s", "")
-    if url == "" then return end
+    if box.Text:gsub("%s", "") == "" then return end
+    local url = extractWebhook(box.Text) or ""
     if not isKey(url) then hook.status = "Bukan URL webhook kunci yang benar" return end
     hook.url, hook.status = url, "Tersimpan"
     pcall(writefile, K.WEBHOOK_FILE, url)
@@ -1654,6 +1677,7 @@ local function renderShuffle()
     and ("Kabar shuffle: tersimpan (...%s). Augustus ketemu = langsung dikirim; belum ketemu = total PP tiap %d menit.")
       :format(shuf.hook:sub(-6), K.OWNER_REPORT_EVERY / 60)
     or "Kabar shuffle: belum diisi (tempel webhook di atas, langsung tersimpan)"
+  if shuf.hookMsg then ui.shufHook.Text = ui.shufHook.Text .. "\n" .. shuf.hookMsg end
   ui.shufStatus.TextColor3 = shuf.found and C.gold or C.text
   ui.shufStats.Text = ("Shuffle: %d | PP terpakai: %d | PP sekarang: %d | Gagal: %d\nCity Hall: %s | "
     .. "Peluang Augustus ~0,05%%/shuffle (rata-rata ~2000 shuffle)")
@@ -1757,7 +1781,7 @@ local function showWebhookPrompt()
     Text = "Buka kunci & mulai" }, box)
   corner(save)
   clickable(save, function()
-    local url = field.Text:gsub("%s", "")
+    local url = extractWebhook(field.Text) or ""
     if not isKey(url) then msg.Text = "Kunci salah. Minta URL webhook yang benar ke pemilik script." return end
     hook.url, hook.status = url, "Tersimpan"
     pcall(writefile, K.WEBHOOK_FILE, url)
