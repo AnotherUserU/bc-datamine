@@ -164,23 +164,83 @@ local function readyLaunchers(templates, used)
   return list
 end
 
--- entri untuk satu bagian: { {launcher, point[, point2]} ... }, jumlah misil yang didapat
-local function buildPart(part, point, used, entries)
+-- entri untuk satu bagian: { {launcher, point[, point2]} ... }, jumlah misil yang didapat.
+-- aim() memberi titik sasaran berikutnya (tiap misil bisa beda bangunan).
+local function buildPart(part, aim, used, entries)
   local got = 0
   for _, l in ipairs(readyLaunchers(part.templates, used)) do
     if got >= part.count then break end
     used[l] = true
     local shots = math.min(shotsOf(l), part.count - got)
     if SEPARATE[l:GetAttribute("RoadTemplateName")] then
-      for _ = 1, shots do entries[#entries + 1] = { launcher = l, point = point } end
+      for _ = 1, shots do entries[#entries + 1] = { launcher = l, point = aim() } end
     else
-      local e = { launcher = l, point = point }
-      if shots >= 2 then e.point2 = point end
+      local e = { launcher = l, point = aim() }
+      if shots >= 2 then e.point2 = aim() end
       entries[#entries + 1] = e
     end
     got = got + shots
   end
   return got
+end
+
+-- ===== sasaran tersebar di kota musuh =====
+-- Urutan: AD -> radar -> launcher rudal -> bangunan militer lain -> bangunan biasa. Jalan tidak dihitung.
+-- Tiap gelombang mulai lagi dari atas daftar, jadi AD selalu kebagian duluan; 1 misil per bangunan,
+-- kalau misil lebih banyak dari bangunan, daftar diulang dari atas.
+local AD_TEMPLATES = {}
+for _, t in ipairs({ "Stinger MANPADS", "Mistral MANPADS", "Igla-S MANPADS", "AA Gun", "RapidFire", "M163 VADS",
+  "CIWS", "Mistral Launcher", "VL MICA Launcher", "S-300 Launcher", "US PAC-2 Launcher", "PatriotPac2", "Pantsir",
+  "Iron Dome", "Enduring Shield Launcher", "US PAC-3 MSE Launcher", "SAMP-TG", "S-400 Launcher", "PatriotPac3",
+  "THAAD Launcher", "S-500Launcher", "Arrow3", "Aquilla Base Launcher" }) do AD_TEMPLATES[t] = true end
+local LAUNCHER_TEMPLATES = {}
+for _, a in ipairs(ALIASES) do for _, t in ipairs(a[2]) do LAUNCHER_TEMPLATES[t] = true end end
+for t in pairs(SEPARATE) do LAUNCHER_TEMPLATES[t] = true end
+local okCatalog, Catalog = pcall(function() return require(RS:WaitForChild("BuildCatalog", 5)) end)
+
+local function rankOf(template)
+  if AD_TEMPLATES[template] then return 1 end
+  if template == "Early Warning Radar" then return 2 end
+  if LAUNCHER_TEMPLATES[template] then return 3 end
+  local item = okCatalog and Catalog and Catalog.GetItemByTemplateName
+    and select(2, pcall(Catalog.GetItemByTemplateName, template))
+  local category = type(item) == "table" and item.category
+  if category == "Roads" or (not category and tostring(template):lower():find("road")) then return nil end
+  return category == "Military" and 4 or 5
+end
+
+local function enemyTargets(uid)
+  local list = {}
+  for _, b in ipairs(Placed:GetChildren()) do
+    if b:IsA("Model") and b:GetAttribute("PlacementOwnerUserId") == uid and b:GetAttribute("Destroyed") ~= true then
+      local rank = rankOf(b:GetAttribute("RoadTemplateName"))
+      local ok, cf = pcall(b.GetPivot, b)
+      if rank and ok then list[#list + 1] = { rank = rank, pos = cf.Position, name = b.Name } end
+    end
+  end
+  table.sort(list, function(a, b)
+    if a.rank ~= b.rank then return a.rank < b.rank end
+    return a.name < b.name
+  end)
+  local nAd = 0
+  for _, t in ipairs(list) do if t.rank == 1 then nAd = nAd + 1 end end
+  return list, nAd
+end
+
+-- aim() untuk satu gelombang: tersebar kalau target = musuh, satu titik kalau target = klik peta
+local function makeAim()
+  local single = st.target
+  if st.enemyUid then
+    local list = enemyTargets(st.enemyUid)
+    if #list > 0 then
+      local i = 0
+      return function()
+        i = i % #list + 1
+        return list[i].pos
+      end, #list
+    end
+  end
+  return function() return single end, 1
 end
 
 -- kirim entries[from..to] sebagai satu barrage
@@ -195,11 +255,11 @@ end
 -- Satu gelombang: sisa gelombang sebelumnya (carry) + launcher gelombang ini.
 -- Tembak per 99. Kalau totalnya lewat 99, sisanya TIDAK ditembak sendiri tapi ikut barrage gelombang
 -- berikutnya (contoh: 104 -> 99 sekarang, 5 ikut 12 hypers = 17). Gelombang terakhir menembak semuanya.
-local function fireWave(index, wave, point, used, carry, isLast)
+local function fireWave(index, wave, aim, used, carry, isLast)
   local entries, summary = carry, {}
   local fromCarry = #carry
   for _, part in ipairs(wave.parts) do
-    local got = buildPart(part, point, used, entries)
+    local got = buildPart(part, aim, used, entries)
     summary[#summary + 1] = ("%s %d/%d"):format(part.name, got, part.count)
   end
   local limit, sent, i = K.BARRAGE_LIMIT, 0, 1
@@ -223,15 +283,16 @@ end
 
 -- satu putaran = semua baris dari atas ke bawah. Mode ulang: putar terus sampai BERHENTI ditekan.
 local function runPlan(waves, gap)
-  local point, round = st.target, 0
+  local round = 0
   repeat
     round = round + 1
     local fired, used, carry = 0, {}, {}   -- used: launcher yang sudah dipakai di putaran ini
     for i, wave in ipairs(waves) do
       if not (current() and running) then break end
       st.status = ("Putaran %d, gelombang %d/%d: %s"):format(round, i, #waves, wave.text)
+      local aim = makeAim()   -- daftar sasaran disegarkan tiap gelombang (bangunan hancur dilewati)
       local sent
-      sent, carry = fireWave(i, wave, point, used, carry, i == #waves)
+      sent, carry = fireWave(i, wave, aim, used, carry, i == #waves)
       fired = fired + sent
       if sent > 0 and (i < #waves or st.loop) then task.wait(gap) end
     end
@@ -315,11 +376,12 @@ local function pickEnemy(step)
   for i, e in ipairs(list) do if e.uid == st.enemyUid then idx = i end end
   if st.enemyUid then idx = (idx - 1 + step) % #list + 1 end
   local e = list[idx]
-  local point, count = enemyPoint(e)
+  local point = enemyPoint(e)
+  local targets, nAd = enemyTargets(e.uid)
   st.enemyUid, st.enemyName = e.uid, ("%s (%d/%d)"):format(e.name, idx, #list)
   if point then
     st.target, st.picking = point, false
-    st.status = ("Target: kota %s, %d bangunan terlihat."):format(e.name, count)
+    st.status = ("Kota %s: %d sasaran (%d AD duluan), misil disebar."):format(e.name, #targets, nAd)
   else
     st.status = "Lokasi kota " .. e.name .. " tidak ditemukan."
   end
