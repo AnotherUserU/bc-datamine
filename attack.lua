@@ -33,37 +33,52 @@ local K = {
   DEFAULT_GAP = 3,         -- detik antar-gelombang
 }
 
--- nama di rencana -> template launcher. Kunci dicocokkan setelah huruf kecil & tanpa spasi/strip.
--- Urutan penting: yang lebih spesifik dulu (heavymrbm sebelum mrbm).
+-- Padanan antar-pack (dari MilitaryPacks.Skins di game). Nama Standard = semua padanannya, jadi
+-- "srbm" memakai SRBM + B-Strike 1000 + ATACMS + Iskander yang kamu punya. Nama pack = launcher itu saja.
+local GROUP = {
+  shahed = { "Shahed Launcher", "Rodeur 330 Rail", "Switchblade Launcher", "LUCAS Launcher" },
+  shahed236 = { "Shahed-236 Launcher", "Veloce 330 Rail", "Red Wolf Launcher" },
+  karrar = { "Karrar Launcher", "One Way Effector Rail", "Barracuda Launcher", "Geran-5 Launcher" },
+  cruise = { "GLCM Launcher", "MdCN Launcher", "FP-5 Flamingo Launcher" },
+  srbm = { "SRBMLauncher", "B-Strike1000Launcher", "M270Launcher", "IskanderLauncher" },
+  mrbm = { "MRBMLauncher", "B-STRIKE 2500 Launcher", "Himars PrSM", "FP9 Pelican Launcher" },
+  heavymrbm = { "HeavyMRBMLauncher", "Typhon Launcher" },
+  cluster = { "ClusterBMLauncher", "ATACMS Cluster Launcher" },
+  hyper = { "Hypersonic BM Launcher", "B-STRIKE Hypersonic launcher", "Dark Eagle Launcher", "Zircon Launcher" },
+}
+-- nama di rencana -> template launcher. Kunci dicocokkan (awalan) setelah huruf kecil & tanpa spasi/strip/titik.
+-- Urutan penting: yang lebih spesifik dulu (shahed236 sebelum shahed, heavymrbm sebelum mrbm).
 local ALIASES = {
-  { "shahed236", { "Shahed-236 Launcher" } },
-  { "sh236", { "Shahed-236 Launcher" } },
-  { "shahed136", { "Shahed Launcher" } },
-  { "sh136", { "Shahed Launcher" } },
-  { "shahed", { "Shahed Launcher" } },
-  { "karrar", { "Karrar Launcher" } },
-  { "geran", { "Geran-5 Launcher" } },
-  -- Standard pack: cruise = GLCM (Tomahawk, 4 misil per launcher), hyper = Hypersonic BM
-  { "cruise", { "GLCM Launcher" } },
-  { "tomahawk", { "GLCM Launcher" } },
-  { "glcm", { "GLCM Launcher" } },
-  { "cluster", { "ClusterBMLauncher" } },
-  { "heavymrbm", { "HeavyMRBMLauncher" } },
-  { "hvmrbm", { "HeavyMRBMLauncher" } },
-  { "mrbm", { "MRBMLauncher" } },
-  { "srbm", { "SRBMLauncher" } },
-  { "hyper", { "Hypersonic BM Launcher" } },
-  { "asbm", { "ASBMLauncher" } },        -- anti-kapal: target harus kapal musuh
-  { "coastal", { "CoastalLauncher" } },  -- Yakhont, anti-kapal
-  { "yakhont", { "CoastalLauncher" } },
-  -- pack lain (Russia / France / USA), hanya kalau ditulis namanya
-  { "flamingo", { "FP-5 Flamingo Launcher" } },
-  { "fp5", { "FP-5 Flamingo Launcher" } },
+  -- Standard (+ semua padanan pack)
+  { "shahed236", GROUP.shahed236 }, { "sh236", GROUP.shahed236 },
+  { "shahed136", GROUP.shahed }, { "sh136", GROUP.shahed }, { "shahed", GROUP.shahed },
+  { "karrar", GROUP.karrar },
+  { "cruise", GROUP.cruise }, { "glcm", GROUP.cruise },
+  { "heavymrbm", GROUP.heavymrbm }, { "hvmrbm", GROUP.heavymrbm },
+  { "mrbm", GROUP.mrbm }, { "srbm", GROUP.srbm },
+  { "cluster", GROUP.cluster }, { "hyper", GROUP.hyper },
+  { "asbm", { "ASBMLauncher" } },                      -- anti-kapal: target harus kapal musuh
+  { "coastal", { "CoastalLauncher" } }, { "yakhont", { "CoastalLauncher" } },
+  -- France
+  { "rodeur", { "Rodeur 330 Rail" } }, { "veloce", { "Veloce 330 Rail" } },
+  { "oneway", { "One Way Effector Rail" } }, { "owe", { "One Way Effector Rail" } },
   { "mdcn", { "MdCN Launcher" } },
+  { "bstrike1000", { "B-Strike1000Launcher" } }, { "bstrike2500", { "B-STRIKE 2500 Launcher" } },
+  { "bstrikehgv", { "B-STRIKE Hypersonic launcher" } }, { "hades", { "Hades Launcher" } },
+  -- USA
+  { "switchblade", { "Switchblade Launcher" } }, { "lucas", { "LUCAS Launcher" } },
+  { "redwolf", { "Red Wolf Launcher" } }, { "barracuda", { "Barracuda Launcher" } },
+  { "tomahawk", { "GLCM Launcher" } },
+  { "atacmscluster", { "ATACMS Cluster Launcher" } }, { "atacms", { "M270Launcher" } },
+  { "prsm", { "Himars PrSM" } }, { "typhon", { "Typhon Launcher" } }, { "sm6", { "Typhon Launcher" } },
+  { "darkeagle", { "Dark Eagle Launcher" } }, { "blackbeard", { "Blackbeard Launcher" } },
+  -- Eastern (Russia). Geran-2/Geran-3 cuma skin Shahed-136/236 (launcher sama).
+  { "geran2", { "Shahed Launcher" } }, { "geran3", { "Shahed-236 Launcher" } },
+  { "geran", { "Geran-5 Launcher" } },
+  { "flamingo", { "FP-5 Flamingo Launcher" } }, { "fp5", { "FP-5 Flamingo Launcher" } },
   { "iskander", { "IskanderLauncher" } },
+  { "pelican", { "FP9 Pelican Launcher" } }, { "fp9", { "FP9 Pelican Launcher" } },
   { "zircon", { "Zircon Launcher" } },
-  { "pelican", { "FP9 Pelican Launcher" } },
-  { "hades", { "Hades Launcher" } },
 }
 -- launcher yang tiap misilnya jadi entri sendiri (sama seperti fireBarrage di game)
 local SEPARATE = {
@@ -84,7 +99,7 @@ end
 
 -- ===== rencana =====
 local function resolve(name)
-  local key = name:lower():gsub("[%s%-_]", "")
+  local key = name:lower():gsub("[%s%-_%.]", "")
   for _, a in ipairs(ALIASES) do
     if key:sub(1, #a[1]) == a[1] then return a[2] end
   end
