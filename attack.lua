@@ -5,6 +5,7 @@
 -- Peluncuran memakai remote game yang sama dengan tombol FIRE (MissileRemotes.LaunchMissileVolley),
 -- hanya launcher milik sendiri yang siap (tidak reload, ada stok). Maks 99 target per barrage; sisanya
 -- langsung dikirim sebagai barrage berikutnya, baru lanjut ke baris di bawahnya.
+-- ULANG ON (default): habis baris terakhir balik ke baris pertama, terus sampai BERHENTI ditekan.
 -- Tombol "-" menyembunyikan panel; klik tab "ATTACK" untuk memunculkan lagi.
 if game.GameId ~= 10757247806 then return end
 local G = (getgenv and getgenv()) or _G
@@ -31,6 +32,7 @@ local K = {
   BARRAGE_LIMIT = 99,      -- target per FireServer (game menolak target ke-101; 99 biar aman)
   CHUNK_GAP = 0.3,         -- detik antar-potongan kalau satu gelombang > 100
   DEFAULT_GAP = 3,         -- detik antar-gelombang
+  IDLE_WAIT = 5,           -- detik tunggu kalau satu putaran penuh tidak ada yang bisa ditembak
 }
 
 -- Padanan antar-pack (dari MilitaryPacks.Skins di game). Nama Standard = semua padanannya, jadi
@@ -89,7 +91,7 @@ local SEPARATE = {
 
 local alive, running = true, false
 local conns = {}
-local st = { target = nil, picking = false, status = "Pilih target dulu.", log = {}, serverMsg = "" }
+local st = { target = nil, picking = false, loop = true, status = "Pilih target dulu.", log = {}, serverMsg = "" }
 
 local function current() return alive and GUI_PARENT:GetAttribute("BCAttackRun") == RUN_ID end
 local function note(msg)
@@ -200,20 +202,30 @@ local function fireWave(index, wave, point)
   end
   if #entries == 0 then
     note(("G%d: tidak ada launcher siap (%s)"):format(index, table.concat(summary, ", ")))
-    return
+    return 0
   end
   local ok, err = pcall(fireEntries, entries)
   note(("G%d %s: %s"):format(index, ok and "terkirim" or "GAGAL", ok and table.concat(summary, ", ") or tostring(err)))
+  return ok and #entries or 0
 end
 
+-- satu putaran = semua baris dari atas ke bawah. Mode ulang: putar terus sampai BERHENTI ditekan.
 local function runPlan(waves, gap)
-  local point = st.target
-  for i, wave in ipairs(waves) do
-    if not (current() and running) then break end
-    st.status = ("Gelombang %d/%d: %s"):format(i, #waves, wave.text)
-    fireWave(i, wave, point)
-    if i < #waves then task.wait(gap) end
-  end
+  local point, round = st.target, 0
+  repeat
+    round = round + 1
+    local fired = 0
+    for i, wave in ipairs(waves) do
+      if not (current() and running) then break end
+      st.status = ("Putaran %d, gelombang %d/%d: %s"):format(round, i, #waves, wave.text)
+      fired = fired + fireWave(i, wave, point)
+      if i < #waves or st.loop then task.wait(gap) end
+    end
+    if st.loop and fired == 0 and current() and running then
+      st.status = ("Putaran %d: semua launcher reload, tunggu %d dtk..."):format(round, K.IDLE_WAIT)
+      task.wait(K.IDLE_WAIT)
+    end
+  until not (st.loop and current() and running)
   st.status = running and "Selesai. Cek log di bawah." or "Dihentikan."
   running = false
 end
@@ -293,8 +305,9 @@ local gapBox = make("TextBox", {
   BorderSizePixel = 0, Font = Enum.Font.Code, TextSize = 13, TextColor3 = C.text, ClearTextOnFocus = false,
   Text = tostring(K.DEFAULT_GAP),
 })
-local pickBtn = button(10, 182, 145, 30, "PILIH TARGET")
-local fireBtn = button(165, 182, 145, 30, "SERANG", C.go)
+local pickBtn = button(10, 182, 96, 30, "TARGET")
+local loopBtn = button(112, 182, 96, 30, "ULANG: ON")
+local fireBtn = button(214, 182, 96, 30, "SERANG", C.go)
 local statusLbl = label(220, 44, 12)
 local logLbl = label(266, 156, 11, C.dim, Enum.Font.Code)
 
@@ -326,6 +339,9 @@ table.insert(conns, pickBtn.MouseButton1Click:Connect(clicked(function()
   st.picking = not st.picking
   st.status = st.picking and "Klik lokasi target di peta/dunia..." or "Batal pilih target."
 end)))
+table.insert(conns, loopBtn.MouseButton1Click:Connect(clicked(function()
+  st.loop = not st.loop   -- boleh diubah saat jalan: OFF = berhenti setelah putaran ini selesai
+end)))
 table.insert(conns, fireBtn.MouseButton1Click:Connect(clicked(function()
   if running then
     running = false
@@ -351,8 +367,10 @@ G.BC_ATTACK = { stop = stop }
 task.spawn(function()
   while current() and gui.Parent do
     pcall(function()
-      pickBtn.Text = st.picking and "BATAL PILIH" or "PILIH TARGET"
+      pickBtn.Text = st.picking and "BATAL" or "TARGET"
       pickBtn.BackgroundColor3 = st.picking and C.warn or C.btn
+      loopBtn.Text = st.loop and "ULANG: ON" or "ULANG: OFF"
+      loopBtn.BackgroundColor3 = st.loop and C.go or C.btn
       fireBtn.Text = running and "BERHENTI" or "SERANG"
       fireBtn.BackgroundColor3 = running and C.stop or C.go
       local tgt = st.target and ("Target: %.0f, %.0f"):format(st.target.X, st.target.Z) or "Target: belum ada"
