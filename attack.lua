@@ -259,13 +259,71 @@ table.insert(conns, UIS.InputBegan:Connect(function(input, processed)
   if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
   local p = groundAt(input.Position)
   if p then
-    st.target, st.picking = p, false
+    st.target, st.picking, st.enemyName, st.enemyUid = p, false, nil, nil
     st.status = ("Target terkunci (%.0f, %.0f)."):format(p.X, p.Z)
   end
 end))
 table.insert(conns, MissileRemotes:WaitForChild("MissileResult").OnClientEvent:Connect(function(ok, msg)
   if not ok and msg then st.serverMsg = tostring(msg) end
 end))
+
+-- ===== target dari daftar musuh (tanpa perlu geser kamera peta) =====
+-- Musuh = pemilik plot lain yang PVP-nya aktif dan bukan sekutu. Titik target = bangunannya yang paling
+-- dekat ke tengah-tengah semua bangunannya (pasti kena bangunan, bukan tanah kosong).
+local function enemies()
+  local allies = "," .. tostring(lp:GetAttribute("AlliedUserIds") or "") .. ","
+  local list, plots = {}, workspace:FindFirstChild("Plots")
+  for _, plot in ipairs(plots and plots:GetChildren() or {}) do
+    local uid = plot:GetAttribute("OwnerUserId")
+    local p = type(uid) == "number" and uid > 0 and uid ~= lp.UserId
+      and not allies:find("," .. uid .. ",", 1, true) and Players:GetPlayerByUserId(uid)
+    if p and p:GetAttribute("PvpEnabled") == true then
+      list[#list + 1] = { uid = uid, name = p.DisplayName, plot = plot }
+    end
+  end
+  table.sort(list, function(a, b) return a.name:lower() < b.name:lower() end)
+  return list
+end
+
+local function enemyPoint(e)
+  local sum, parts = Vector3.zero, {}
+  for _, b in ipairs(Placed:GetChildren()) do
+    if b:IsA("Model") and b:GetAttribute("PlacementOwnerUserId") == e.uid and b:GetAttribute("Destroyed") ~= true then
+      local ok, cf = pcall(b.GetPivot, b)
+      if ok then parts[#parts + 1] = cf.Position sum = sum + cf.Position end
+    end
+  end
+  if #parts == 0 then
+    local ok, cf = pcall(e.plot.GetPivot, e.plot)
+    return ok and cf.Position or nil, 0
+  end
+  local mid, best, bestD = sum / #parts, nil, math.huge
+  for _, pos in ipairs(parts) do
+    local d = (Vector2.new(pos.X, pos.Z) - Vector2.new(mid.X, mid.Z)).Magnitude
+    if d < bestD then best, bestD = pos, d end
+  end
+  return best, #parts
+end
+
+local function pickEnemy(step)
+  local list = enemies()
+  if #list == 0 then
+    st.enemyName, st.status = nil, "Tidak ada musuh dengan PVP aktif (selain sekutu)."
+    return
+  end
+  local idx = 1
+  for i, e in ipairs(list) do if e.uid == st.enemyUid then idx = i end end
+  if st.enemyUid then idx = (idx - 1 + step) % #list + 1 end
+  local e = list[idx]
+  local point, count = enemyPoint(e)
+  st.enemyUid, st.enemyName = e.uid, ("%s (%d/%d)"):format(e.name, idx, #list)
+  if point then
+    st.target, st.picking = point, false
+    st.status = ("Target: kota %s, %d bangunan terlihat."):format(e.name, count)
+  else
+    st.status = "Lokasi kota " .. e.name .. " tidak ditemukan."
+  end
+end
 
 -- ===== panel =====
 local C = {
@@ -276,7 +334,7 @@ local C = {
 local gui = Instance.new("ScreenGui")
 gui.Name, gui.ResetOnSpawn, gui.DisplayOrder = "BCAttack", false, 60
 local frame = Instance.new("Frame")
-frame.Size, frame.Position = UDim2.fromOffset(320, 430), UDim2.new(1, -332, 0, 80)
+frame.Size, frame.Position = UDim2.fromOffset(320, 466), UDim2.new(1, -332, 0, 80)
 frame.BackgroundColor3, frame.BorderSizePixel, frame.Active, frame.Draggable = C.bg, 0, true, true
 frame.Parent = gui
 Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
@@ -319,11 +377,15 @@ local gapBox = make("TextBox", {
   BorderSizePixel = 0, Font = Enum.Font.Code, TextSize = 13, TextColor3 = C.text, ClearTextOnFocus = false,
   Text = tostring(K.DEFAULT_GAP),
 })
-local pickBtn = button(10, 182, 96, 30, "TARGET")
-local loopBtn = button(112, 182, 96, 30, "ULANG: ON")
-local fireBtn = button(214, 182, 96, 30, "SERANG", C.go)
-local statusLbl = label(220, 44, 12)
-local logLbl = label(266, 156, 11, C.dim, Enum.Font.Code)
+local prevBtn = button(10, 182, 30, 30, "<")
+local enemyBtn = button(44, 182, 232, 30, "PILIH MUSUH")
+local nextBtn = button(280, 182, 30, 30, ">")
+enemyBtn.TextTruncate = Enum.TextTruncate.AtEnd
+local pickBtn = button(10, 218, 96, 30, "KLIK PETA")
+local loopBtn = button(112, 218, 96, 30, "ULANG: ON")
+local fireBtn = button(214, 218, 96, 30, "SERANG", C.go)
+local statusLbl = label(256, 44, 12)
+local logLbl = label(302, 156, 11, C.dim, Enum.Font.Code)
 
 local tab = make("TextButton", {
   Position = UDim2.new(1, -92, 0, 80), Size = UDim2.fromOffset(80, 26), BackgroundColor3 = C.bg,
@@ -353,6 +415,12 @@ table.insert(conns, pickBtn.MouseButton1Click:Connect(clicked(function()
   st.picking = not st.picking
   st.status = st.picking and "Klik lokasi target di peta/dunia..." or "Batal pilih target."
 end)))
+for btn, step in pairs({ [prevBtn] = -1, [enemyBtn] = 0, [nextBtn] = 1 }) do
+  table.insert(conns, btn.MouseButton1Click:Connect(clicked(function()
+    if running then st.status = "Hentikan serangan dulu untuk ganti target." return end
+    pickEnemy(step)
+  end)))
+end
 table.insert(conns, loopBtn.MouseButton1Click:Connect(clicked(function()
   st.loop = not st.loop   -- boleh diubah saat jalan: OFF = berhenti setelah putaran ini selesai
 end)))
@@ -381,7 +449,8 @@ G.BC_ATTACK = { stop = stop }
 task.spawn(function()
   while current() and gui.Parent do
     pcall(function()
-      pickBtn.Text = st.picking and "BATAL" or "TARGET"
+      enemyBtn.Text = st.enemyName and ("MUSUH: " .. st.enemyName) or "PILIH MUSUH"
+      pickBtn.Text = st.picking and "BATAL" or "KLIK PETA"
       pickBtn.BackgroundColor3 = st.picking and C.warn or C.btn
       loopBtn.Text = st.loop and "ULANG: ON" or "ULANG: OFF"
       loopBtn.BackgroundColor3 = st.loop and C.go or C.btn
