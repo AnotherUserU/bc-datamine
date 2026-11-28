@@ -33,6 +33,13 @@ local K = {
   CHUNK_GAP = 0.3,         -- detik antar-potongan kalau satu gelombang > 100
   DEFAULT_GAP = 3,         -- detik antar-gelombang
   IDLE_WAIT = 5,           -- detik tunggu kalau satu putaran penuh tidak ada yang bisa ditembak
+  SCAN_HEIGHT = 600,       -- kamera pindai: tinggi & mundur dari tengah kota musuh
+  SCAN_BACK = 400,
+  SCAN_MAX = 90,           -- detik maks seluruh pindai
+  SCAN_SPOT_MAX = 20,      -- detik maks di satu titik kamera
+  SCAN_SPOT_MIN = 5,       -- detik min di satu titik (load sering mulai telat)
+  SCAN_STABLE = 4,         -- pindah titik kalau jumlah bangunan tidak naik 4 detik berturut-turut
+  SCAN_SPREAD = 600,       -- stud maks geser kamera dari tengah kota ke tiap kuadran
 }
 
 -- Padanan antar-pack (dari MilitaryPacks.Skins di game). Nama Standard = semua padanannya, jadi
@@ -215,7 +222,7 @@ local function enemyTargets(uid)
     if b:IsA("Model") and b:GetAttribute("PlacementOwnerUserId") == uid and b:GetAttribute("Destroyed") ~= true then
       local rank = rankOf(b:GetAttribute("RoadTemplateName"))
       local ok, cf = pcall(b.GetPivot, b)
-      if rank and ok then list[#list + 1] = { rank = rank, pos = cf.Position, name = b.Name } end
+      if rank and ok then list[#list + 1] = { rank = rank, pos = cf.Position, name = b.Name, model = b } end
     end
   end
   table.sort(list, function(a, b)
@@ -227,11 +234,29 @@ local function enemyTargets(uid)
   return list, nAd
 end
 
+-- Sasaran untuk gelombang ini: hasil pindai (st.targets) dikurangi yang sudah hancur, ditambah bangunan
+-- yang sekarang ter-load tapi belum ada di daftar. Bangunan yang tidak ter-load lagi tetap dipakai
+-- (posisinya tidak berubah), jadi kamera tidak perlu tetap di kota musuh.
+local function currentTargets(uid)
+  local live, seen, list = enemyTargets(uid), {}, {}
+  for _, t in ipairs(live) do seen[t.model] = true end
+  for _, t in ipairs(st.targets or {}) do
+    local gone = t.model.Parent ~= nil and t.model:GetAttribute("Destroyed") == true
+    if not gone and not seen[t.model] then list[#list + 1] = t end
+  end
+  for _, t in ipairs(live) do list[#list + 1] = t end
+  table.sort(list, function(a, b)
+    if a.rank ~= b.rank then return a.rank < b.rank end
+    return a.name < b.name
+  end)
+  return list
+end
+
 -- aim() untuk satu gelombang: tersebar kalau target = musuh, satu titik kalau target = klik peta
 local function makeAim()
   local single = st.target
   if st.enemyUid then
-    local list = enemyTargets(st.enemyUid)
+    local list = currentTargets(st.enemyUid)
     if #list > 0 then
       local i = 0
       return function()
@@ -320,7 +345,7 @@ table.insert(conns, UIS.InputBegan:Connect(function(input, processed)
   if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
   local p = groundAt(input.Position)
   if p then
-    st.target, st.picking, st.enemyName, st.enemyUid = p, false, nil, nil
+    st.target, st.picking, st.enemyName, st.enemyUid, st.targets = p, false, nil, nil, nil
     st.status = ("Target terkunci (%.0f, %.0f)."):format(p.X, p.Z)
   end
 end))
@@ -366,6 +391,67 @@ local function enemyPoint(e)
   return best, #parts
 end
 
+-- Paksa load kota musuh: game memuat bangunan di sekitar KAMERA (RemoteViewStreaming + PlotInterest),
+-- jadi kamera dipindah ke atas kota itu, tunggu sampai jumlah bangunan berhenti naik, lalu kamera kembali.
+-- titik-titik kamera: tengah kota + 4 kuadran (kota besar tidak ter-load semua dari satu titik)
+local function scanSpots(e)
+  local ok, cf, size = pcall(function()
+    if e.plot:IsA("BasePart") then return e.plot.CFrame, e.plot.Size end
+    return e.plot:GetBoundingBox()
+  end)
+  if not ok then
+    local p = enemyPoint(e)
+    return p and { p } or {}
+  end
+  local c, hx, hz = cf.Position, math.min(size.X / 4, K.SCAN_SPREAD), math.min(size.Z / 4, K.SCAN_SPREAD)
+  return { c, c + Vector3.new(hx, 0, hz), c + Vector3.new(-hx, 0, hz), c + Vector3.new(-hx, 0, -hz),
+    c + Vector3.new(hx, 0, -hz), c }
+end
+
+-- tahan kamera di satu titik sampai jumlah bangunan tidak naik selama SCAN_STABLE detik
+local function holdUntilStable(cam, spot, e, label, started)
+  local view = CFrame.lookAt(spot + Vector3.new(0, K.SCAN_HEIGHT, K.SCAN_BACK), spot)
+  local last, stable, t0 = -1, 0, os.clock()
+  while os.clock() - t0 < K.SCAN_SPOT_MAX and os.clock() - started < K.SCAN_MAX and current() do
+    cam.CFrame = view
+    task.wait(1)
+    local n = #enemyTargets(e.uid)
+    st.status = ("Memuat kota %s %s: %d bangunan (%d dtk)"):format(e.name, label, n, math.floor(os.clock() - started))
+    stable = (n <= last) and stable + 1 or 0
+    last = math.max(n, last)
+    if stable >= K.SCAN_STABLE and os.clock() - t0 >= K.SCAN_SPOT_MIN then return end
+  end
+end
+
+local function scanCity(e)
+  local spots = scanSpots(e)
+  if #spots == 0 then
+    st.status = "Lokasi kota " .. e.name .. " tidak ditemukan."
+    return
+  end
+  local cam = workspace.CurrentCamera
+  local saved = { type = cam.CameraType, subject = cam.CameraSubject, cframe = cam.CFrame }
+  local started = os.clock()
+  local ok, err = pcall(function()
+    cam.CameraType = Enum.CameraType.Scriptable
+    for i, spot in ipairs(spots) do
+      if not current() or os.clock() - started >= K.SCAN_MAX then break end
+      holdUntilStable(cam, spot, e, ("titik %d/%d"):format(i, #spots), started)
+    end
+  end)
+  pcall(function()
+    cam.CameraType = saved.type
+    cam.CameraSubject = saved.subject
+    cam.CFrame = saved.cframe
+  end)
+  if not ok then error(err) end
+  local targets, nAd = enemyTargets(e.uid)
+  st.targets = targets
+  st.target = targets[1] and targets[1].pos or spots[1]
+  st.status = ("Kota %s: %d sasaran (%d AD duluan), dimuat %d dtk. Klik nama musuh untuk pindai ulang.")
+    :format(e.name, #targets, nAd, math.floor(os.clock() - started))
+end
+
 local function pickEnemy(step)
   local list = enemies()
   if #list == 0 then
@@ -376,15 +462,13 @@ local function pickEnemy(step)
   for i, e in ipairs(list) do if e.uid == st.enemyUid then idx = i end end
   if st.enemyUid then idx = (idx - 1 + step) % #list + 1 end
   local e = list[idx]
-  local point = enemyPoint(e)
-  local targets, nAd = enemyTargets(e.uid)
-  st.enemyUid, st.enemyName = e.uid, ("%s (%d/%d)"):format(e.name, idx, #list)
-  if point then
-    st.target, st.picking = point, false
-    st.status = ("Kota %s: %d sasaran (%d AD duluan), misil disebar."):format(e.name, #targets, nAd)
-  else
-    st.status = "Lokasi kota " .. e.name .. " tidak ditemukan."
-  end
+  st.enemyUid, st.enemyName, st.targets, st.picking = e.uid, ("%s (%d/%d)"):format(e.name, idx, #list), {}, false
+  st.scanning = true
+  task.spawn(function()
+    local ok, err = pcall(scanCity, e)
+    st.scanning = false
+    if not ok then st.status = "Pindai gagal: " .. tostring(err) end
+  end)
 end
 
 -- ===== panel =====
@@ -480,6 +564,7 @@ end)))
 for btn, step in pairs({ [prevBtn] = -1, [enemyBtn] = 0, [nextBtn] = 1 }) do
   table.insert(conns, btn.MouseButton1Click:Connect(clicked(function()
     if running then st.status = "Hentikan serangan dulu untuk ganti target." return end
+    if st.scanning then return end
     pickEnemy(step)
   end)))
 end
@@ -494,6 +579,7 @@ table.insert(conns, fireBtn.MouseButton1Click:Connect(clicked(function()
   end
   local waves, err = parsePlan(planBox.Text)
   if not waves then st.status = "Rencana salah: " .. err return end
+  if st.scanning then st.status = "Tunggu, kota musuh masih dimuat..." return end
   if not st.target then st.status = "Pilih target dulu." return end
   pcall(writefile, K.PLAN_FILE, planBox.Text)
   running, st.serverMsg = true, ""
